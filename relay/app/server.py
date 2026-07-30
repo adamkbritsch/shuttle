@@ -137,7 +137,7 @@ def main():
 
     threading.Thread(target=seedbox_watchdog, args=(jobs,), daemon=True).start()
 
-    # HTTP front end for the SeedLocal Mac app. It goes HERE because
+    # HTTP front end for the Shuttle Mac app. It goes HERE because
     # serve_forever() below never returns -- it is pyftpdlib's single-threaded
     # ioloop on THIS thread, so anything that must coexist with FTP has to be
     # started before it, on its own daemon thread. api.start() binds

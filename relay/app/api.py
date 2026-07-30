@@ -1,4 +1,4 @@
-"""HTTP front end for the relay, for the SeedLocal Mac app.
+"""HTTP front end for the relay, driven by the Shuttle Mac app.
 
 A SECOND CALLER of the same choke point, never a second implementation: every
 enqueue goes through guards.validate_request, exactly as the FTP path does. If you
