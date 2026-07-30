@@ -3,12 +3,11 @@ import SwiftUI
 
 /// Chrome constants and the small shared controls.
 ///
-/// Kept in step with the two sibling apps (qBittorrent Seedbox, 1337x Torrents) so
-/// all three read as one family: same bar height, same pill geometry, same opacities.
+/// One place for the chrome metrics so the whole window stays internally
+/// consistent: same bar height, same pill geometry, same opacities throughout.
 enum Theme {
-    /// 44, matching qBittorrent Seedbox and 1337x Torrents so all three read as one
-    /// family. The content row inside is still centred on the measured traffic-light
-    /// position, so the alignment fix is unaffected by this being a fixed height.
+    /// The content row inside is centred on the MEASURED traffic-light position, not
+    /// on this height, so the alignment holds even though the bar is a fixed size.
     static let barHeight: CGFloat = 44
 
     /// Distance from the window's top edge to the CENTRE of the traffic lights,
@@ -21,12 +20,12 @@ enum Theme {
     static var trafficLightCenterY: CGFloat = 13
 
     /// The titlebar is hidden and the content is full-size, so the traffic lights sit
-    /// over our own bar — this reserves their space, and then some: it puts the title
-    /// exactly where qBittorrent Seedbox puts its own.
+    /// over our own bar — this reserves their space, and then some.
     ///
-    /// That app uses a 78pt gutter and then an app icon before the text — 78 + 10
-    /// spacing + 17 icon + 10 spacing = 115. Shuttle drops the icon, so the gutter
-    /// has to carry the whole distance for the two windows to line up side by side.
+    /// It clears the three buttons AND leaves a real gap after them. Anything much
+    /// below ~100 puts the title close enough to the green button to read as
+    /// crowded; this is the measured distance at which it stops doing that. Note the
+    /// `HStack` spacing lands the text 10pt further right again.
     static let trafficLightGutter: CGFloat = 115
 
     static let hairline = Color.primary.opacity(0.09)

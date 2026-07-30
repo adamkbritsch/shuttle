@@ -158,7 +158,7 @@ def validate_rename(path: str, new_name: str, require_exists: bool = True):
     """Gate for renaming something that already landed on the NAS.
 
     The seedbox side is deliberately NOT renameable: that mount is bound read-only
-    and `_deny_seedbox` exists to keep qBittorrent seeding, so a rename there would
+    and `_deny_seedbox` exists to keep the torrent still seeding, so renaming there would
     both fail and, if it somehow succeeded, break the torrent.
     """
     src = os.path.normpath(path)

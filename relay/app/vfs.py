@@ -223,7 +223,7 @@ class RelayFS(AbstractedFS):
         if _under(path, SEEDBOX):
             # The bind is read-only so the kernel would refuse anyway, but this
             # returns a clean 550 instead of an EROFS traceback -- and it is the
-            # belt-and-braces guard that keeps qBittorrent seeding.
+            # belt-and-braces guard that keeps the torrent seeding.
             raise FilesystemError("seedbox is mounted read-only")
 
     @staticmethod
