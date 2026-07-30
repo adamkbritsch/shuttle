@@ -26,6 +26,19 @@ renders progress. Close the lid mid-copy and the copy carries on.
 It is deliberately smaller than FileZilla. Two panes, one queue, no site manager,
 no protocol zoo, no delete.
 
+### Prior art
+
+[AList](https://github.com/AlistGo/alist) is the closest general-purpose
+alternative, and a more capable program than this one: it speaks to dozens of
+storage backends, seedboxes among them, and will copy between any two of them from
+a browser. If you want one pane of glass over every cloud you own, use AList.
+
+The cost of that generality is that the operation has to be assembled each time —
+choose a storage, navigate it, select, find the copy action, pick a target
+storage, navigate that. Shuttle only does one thing, so there is nothing to
+assemble: the two panes are already the two ends of the transfer, and the only
+verb is Send.
+
 ## How it fits together
 
 ```
