@@ -1,0 +1,12 @@
+# Secrets. Neither of these may ever be committed.
+.env                    # RELAY_API_TOKEN, FTP_USER, FTP_PASS
+data/seedbox.json       # seedbox host/user/obscured password
+
+# Runtime state
+data/
+!data/.gitkeep
+
+# Working copies this project makes before editing anything in place
+*.bak-*
+__pycache__/
+*.pyc

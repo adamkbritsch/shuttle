@@ -1,0 +1,223 @@
+import SwiftUI
+
+/// One side of the browse area: an editable path bar, the file table, and a status
+/// line. Mirrors FileZilla's `CView` — header, list, status bar — minus the pieces
+/// that have no referent here (quick search, recursive-operation footer).
+///
+/// The tree/list divider is NOT nested here: SplitTree owns every split, so RootView
+/// composes the tree pane and this pane as siblings.
+struct BrowsePane: View {
+    @ObservedObject var browse: BrowseStore
+    let title: String
+    var connected: Bool = true
+    var onAddToQueue: ([Entry]) -> Void = { _ in }
+    var destinationName: String = ""
+    var onRename: (Entry) -> Void = { _ in }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PathBar(browse: browse, title: title)
+            Divider().overlay(Theme.hairline)
+            content
+            Divider().overlay(Theme.hairline)
+            ListStatusLine(browse: browse, connected: connected)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let error = browse.error, browse.entries.isEmpty {
+            failure(error)
+        } else {
+            ZStack(alignment: .top) {
+                FileTable(browse: browse,
+                          paneKey: browse.mode == .seedbox ? "source" : "dest",
+                          onAddToQueue: onAddToQueue,
+                          destinationName: destinationName,
+                          onRename: onRename)
+                if let error = browse.error {
+                    Text(error)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Color(nsColor: .systemOrange))
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.thinMaterial)
+                }
+                if browse.loading && browse.entries.isEmpty {
+                    ProgressView().controlSize(.small)
+                        .frame(maxWidth: .infinity).padding(.top, 24)
+                }
+            }
+        }
+    }
+
+    /// A failed listing must offer a way out. Without this the pane was a dead end:
+    /// the only recovery was the menu bar or relaunching.
+    private func failure(_ text: String) -> some View {
+        VStack(spacing: 9) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(Color(nsColor: .systemOrange))
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 18)
+            HStack(spacing: 8) {
+                Button("Try Again") { Task { await browse.reload() } }
+                if browse.canGoUp {
+                    Button("Go Up") { Task { await browse.goUp() } }
+                }
+            }
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func centered(_ text: String, symbol: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// FileZilla's `CViewHeader`: a label plus an editable combo of the last 20
+/// directories. Typing a path and pressing Return jumps straight there, which beats
+/// clicking down a tree when you already know the release name.
+private struct PathBar: View {
+    @ObservedObject var browse: BrowseStore
+    let title: String
+
+    @State private var draft = ""
+    @State private var editing = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ChromeButton(symbol: "chevron.left", help: "Enclosing folder (⌘↑)",
+                         enabled: browse.canGoUp) {
+                Task { await browse.goUp() }
+            }
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+
+            TextField("", text: $draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .focused($focused)
+                .onSubmit { commit() }
+                .onChange(of: focused) { _, now in
+                    editing = now
+                    if !now { draft = browse.path }        // abandon an unsubmitted edit
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 21)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(editing ? Theme.pillFillHover : Theme.pillFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(editing ? Theme.accent.opacity(0.70) : .clear,
+                                      lineWidth: 1)
+                )
+
+            if !browse.recentDirs.isEmpty {
+                Menu {
+                    // Alphabetical for display, like FileZilla's sorted MRU, while the
+                    // underlying list stays newest-first for eviction.
+                    ForEach(browse.recentDirs.sorted(), id: \.self) { p in
+                        Button(p) { Task { await browse.go(to: p) } }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Recent folders")
+            }
+
+            if browse.loading {
+                ProgressView().controlSize(.small).scaleEffect(0.65)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .onAppear { draft = browse.path }
+        .onChange(of: browse.path) { _, new in if !editing { draft = new } }
+    }
+
+    private func commit() {
+        let p = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty, p != browse.path else { draft = browse.path; return }
+        focused = false
+        Task { await browse.go(to: p) }
+    }
+}
+
+/// The destination pane's footer: what will happen, and the button that does it.
+struct SendBar: View {
+    let sources: [Entry]
+    let destination: String
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 11.5, weight: sources.isEmpty ? .regular : .medium))
+                        .foregroundStyle(sources.isEmpty ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                    // The resolved destination, so there is never ambiguity about
+                    // where something lands.
+                    Text("into \(destination)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.head)
+                }
+                Spacer()
+                Button(action: action) {
+                    Text("Send to NAS").font(.system(size: 12, weight: .medium))
+                }
+                // The one primary action in the window, so it carries the icon's
+                // blue as a filled button rather than a bezelled default one.
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!enabled)
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+        }
+    }
+
+    private var label: String {
+        switch sources.count {
+        case 0: return "Select something on the left"
+        case 1: return sources[0].name
+        default: return "\(sources.count) items"
+        }
+    }
+}

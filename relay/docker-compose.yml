@@ -1,0 +1,45 @@
+services:
+  ftp-relay:
+    build: .
+    image: seedbox-ftp-relay:latest
+    container_name: seedbox-ftp-relay
+    restart: unless-stopped
+    # Host networking so pyftpdlib's PassiveDTP sees the real local address of
+    # the control connection and advertises the tailnet IP for passive mode.
+    # With Docker NAT it would advertise an unreachable container address.
+    network_mode: host
+    # Must match the ownership of your destination volumes, or the relay will
+    # write files your other services cannot read.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: .env
+    environment:
+      FTP_BIND_ADDR: "${FTP_BIND_ADDR:?set FTP_BIND_ADDR in .env}"   # tailnet only, deliberately NOT 0.0.0.0
+      FTP_PORT: "2121"                  # :21 is UGOS smbftpd — must not be touched
+      FTP_PASV_LOW: "50400"             # avoids the already-occupied :50300
+      FTP_PASV_HIGH: "50450"
+      RELAY_MAX_JOBS: "1"
+      RELAY_REMOTE: "seedbox:"   # mount root == remote root (see SEEDBOX_MOUNT in jobs.py)
+      RELAY_API_PORT: "8789"            # free and unclaimed; 8787 is reserved for plexify
+      RELAY_API_BIND: "${RELAY_API_BIND:?set RELAY_API_BIND in .env}"   # tailnet only, deliberately NOT 0.0.0.0
+      TZ: US/Mountain
+    volumes:
+      - ./data:/data
+      # Bind the code in so a fix is a restart rather than a rebuild.
+      - ./app:/app:ro
+      - /volume1/docker/rclone/config:/config/rclone:ro
+      # Every destination you want to copy INTO. Add or remove freely: the
+      # relay shows exactly what is mounted under /srv/tree/queue and will
+      # refuse to write anywhere else.
+      - ${DEST_1:?set DEST_1 in .env}:/srv/tree/queue/${DEST_1_NAME:-Media}
+      # Safe verification target: writes nothing shared, so tests cannot fire
+      # nas-watcher or litter the media library.
+      - ./data/test:/srv/tree/queue/_scratch
+      # OPTIONAL. Only the FTP front end (for FileZilla) needs a seedbox mount;
+      # Shuttle talks to the seedbox directly over rclone. Delete this block if
+      # you only use Shuttle.
+      - type: bind
+        source: ${SEEDBOX_MOUNT:-/dev/null}
+        target: /srv/tree/seedbox
+        read_only: true
+        bind:
+          propagation: rslave

@@ -1,0 +1,27 @@
+== browse ==
+  NLST /seedbox/downloads                      23 entries
+  NLST /queue                                  ['Media', 'MediaVolume2', 'MediaVolume3', '_active', '_done', '_scratch']
+== primary trigger ==
+  RNTO -> volume root                          OK 250 Renaming ok.  [0.01s]
+    job                                        {'id': 40, 'state': 'done', 'dest_dir': '/srv/tree/queue/_scratch', 'error': None}
+  RNTO -> existing subfolder                   OK 250 Renaming ok.  [0.01s]
+    job                                        {'id': 41, 'state': 'done', 'dest_dir': '/srv/tree/queue/_scratch/Movies', 'error': None}
+== fallback A (rename with @) ==
+  X@_scratch                                   OK 250 Renaming ok.  [0.22s]
+  X@_scratch/Movies                            OK 250 Renaming ok.  [0.01s]
+== fallback B (MKD) ==
+  MKD naming a real release                    OK /queue/_scratch/OpenVPN  [0.00s]
+  MKD NotAReleaseName (must CREATE)            OK /queue/_scratch/NotAReleaseName  [0.00s]
+== guards: every one of these must be refused, with stable text ==
+  RNTO into nonexistent folder                 REFUSED 550 no such folder: /queue/_scratch/Movis — create it first, or drop onto a folder that already 
+  rename @../../etc                            REFUSED 550 seedbox is read-only; drag into /queue/<Volume> (or any folder inside it) to copy it to the 
+  src /seedbox (whole tree)                    REFUSED 550 refusing the seedbox root: that is a whole level of the library, not a release -- drag an in
+  src /seedbox/downloads (whole lib)           REFUSED 550 refusing 'downloads': that is a whole level of the library, not a release -- drag an individ
+  MKD downloads inside a target                REFUSED 550 refusing 'downloads': that is a whole level of the library, not a release -- drag an individ
+  DELE under /seedbox                          REFUSED 550 seedbox is mounted read-only.
+  RNTO to a non-target (/seedbox)              REFUSED 550 seedbox is read-only; drag into /queue/<Volume> (or any folder inside it) to copy it to the 
+== status folders ==
+  NLST /queue/_done                            43 entries
+  RETR a _done entry (its log)                 1182 bytes
+  RMD /queue/_active (must refuse)             REFUSED 550 _active and _done are status folders and cannot be removed.
+== done ==

@@ -1,0 +1,16 @@
+# Secrets — never commit these.
+relay/.env
+relay/data/
+
+# Build output
+macapp/dist/
+dist/
+*.app/
+
+# macOS
+.DS_Store
+
+# Working copies made before in-place edits
+*.bak-*
+__pycache__/
+*.pyc
