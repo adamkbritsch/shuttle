@@ -141,4 +141,10 @@ The relay writes into media volumes, so the guard rails are load-bearing:
 
 MIT — see [LICENSE](LICENSE).
 
-Not affiliated with FileZilla, rclone, or any seedbox provider.
+Not affiliated with FileZilla, rclone, AList, or any seedbox provider.
+
+---
+
+<p align="center">
+  <img src="docs/assets/app-icon.png" alt="The Shuttle app icon" width="96">
+</p>
