@@ -207,7 +207,11 @@ private struct JobRow: View {
                         .tint(job.kind == .running ? Theme.accent : Theme.accentIndigo)
                 }
                 Text(job.progressText)
-                    .font(.system(size: 10.5))
+                    // The line you actually read while a transfer runs, so it is
+                    // sized to be read at a glance from across the desk rather than
+                    // to match the secondary metadata around it. Still under the
+                    // 12.5 medium filename above, which stays the row's headline.
+                    .font(.system(size: 12))
                     .foregroundStyle(job.kind == .failed ? Color(nsColor: .systemRed) : .secondary)
                     .lineLimit(1).truncationMode(.tail)
                 Text(job.destPath)
