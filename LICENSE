@@ -19,3 +19,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+ARTWORK EXCEPTION
+
+The MIT licence above applies to the source code in this repository.
+
+It does NOT apply to the application artwork:
+
+    macapp/Shuttle.icon/          (icon source, required to build the app)
+    docs/assets/app-icon.png
+    docs/assets/shuttle-lockup-v3.png
+
+These derive from imagery licensed through Adobe Stock and remain subject to the
+Adobe Stock licence terms. They are included only so the application can be built
+and the documentation can render. They may not be extracted, redistributed,
+resold, or reused in other works.
+
+If you fork this project, replace the artwork with your own.
