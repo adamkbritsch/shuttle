@@ -22,11 +22,15 @@ enum Theme {
     /// The titlebar is hidden and the content is full-size, so the traffic lights sit
     /// over our own bar — this reserves their space, and then some.
     ///
-    /// It clears the three buttons AND leaves a real gap after them. Anything much
-    /// below ~100 puts the title close enough to the green button to read as
-    /// crowded; this is the measured distance at which it stops doing that. Note the
-    /// `HStack` spacing lands the text 10pt further right again.
-    static let trafficLightGutter: CGFloat = 115
+    /// It clears the three buttons AND leaves a real gap after them. The lights end
+    /// around 67pt, so this is comfortably clear of the green one while still
+    /// reading as part of the same row. Note the `HStack` spacing lands the first
+    /// item 10pt further right again.
+    ///
+    /// It was 115 while the bar led with the word rather than the mark: a wordmark
+    /// starting that close to the lights read as crowded, where a 17pt icon does
+    /// not.
+    static let trafficLightGutter: CGFloat = 96
 
     static let hairline = Color.primary.opacity(0.09)
     static let pillFill = Color.primary.opacity(0.06)

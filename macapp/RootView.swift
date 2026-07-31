@@ -454,6 +454,10 @@ private struct TopBar: View {
                         .foregroundStyle(Color.primary.opacity(0.55))
                         .accessibilityLabel("Shuttle")
                 }
+                Text("Shuttle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.primary.opacity(0.85))
+                    .fixedSize()
                 Spacer()
                 statusPill
                 ChromeButton(symbol: "arrow.clockwise", help: "Refresh (⌘R)", action: onRefresh)
