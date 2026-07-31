@@ -1,27 +1,27 @@
 # Shuttle
 
-A pared-back, FileZilla-shaped client for moving files from a seedbox to a NAS —
-where the part that actually does the copying lives somewhere other than the
+A pared-back, FileZilla-shaped client for moving files from a remote server onto a
+NAS — where the part that actually does the copying lives somewhere other than the
 machine you're clicking on.
 
-![Shuttle: seedbox on the left, NAS volumes on the right, transfers below](docs/screenshot.png)
+![Shuttle: the remote server on the left, NAS volumes on the right, transfers below](docs/screenshot.png)
 
 ## Why
 
 FileZilla's two-pane layout is the right shape for this job. Its engine is in the
-wrong place. Point FileZilla at a seedbox and a NAS and every byte detours through
-whatever laptop happens to have the window open — twice over the same Wi-Fi, at
-the mercy of the lid staying up.
+wrong place. Point FileZilla at a remote server and a NAS and every byte detours
+through whatever laptop happens to have the window open — twice over the same
+Wi-Fi, at the mercy of the lid staying up.
 
-The common fix is to mount the seedbox on the NAS and copy locally. That works,
-and leaves you maintaining a FUSE mount and a mirror of a filesystem you never
-wanted a copy of.
+The common fix is to mount the remote server on the NAS and copy locally. That
+works, and leaves you maintaining a FUSE mount and a mirror of a filesystem you
+never wanted a copy of.
 
 Shuttle keeps the interface and relocates the engine. The panes, the queue, the
 draggable splitters and the transfer list all behave roughly the way you expect,
 but nothing is transferred by the app: a small service on the NAS talks straight
-to the seedbox and streams server-to-server. Your Mac sends instructions and
-renders progress. Close the lid mid-copy and the copy carries on.
+to the remote server and streams server-to-server. Your Mac sends instructions
+and renders progress. Close the lid mid-copy and the copy carries on.
 
 It is deliberately smaller than FileZilla. Two panes, one queue, no site manager,
 no protocol zoo, no delete.
@@ -30,8 +30,9 @@ no protocol zoo, no delete.
 
 [AList](https://github.com/AlistGo/alist) is the closest general-purpose
 alternative, and a more capable program than this one: it speaks to dozens of
-storage backends, seedboxes among them, and will copy between any two of them from
-a browser. If you want one pane of glass over every cloud you own, use AList.
+storage backends, remote file servers among them, and will copy between any two
+of them from a browser. If you want one pane of glass over every cloud you own,
+use AList.
 
 The cost of that generality is that the operation has to be assembled each time —
 choose a storage, navigate it, select, find the copy action, pick a target
@@ -42,7 +43,7 @@ verb is Send.
 ## How it fits together
 
 ```
-  macOS app  ──HTTP──▶  relay (Docker, on the NAS)  ──rclone──▶  seedbox
+  macOS app  ──HTTP──▶  relay (Docker, on the NAS)  ──rclone──▶  remote server
    Shuttle              browse · queue · progress                FTPS/FTP/SFTP
    the controls               │                                  the source
                               └──writes──▶  your media volumes
@@ -92,10 +93,10 @@ Open Shuttle, then **Settings**:
 
 - **Address** — `http://<nas-private-ip>:8789`
 - **API token** — the one from `.env`
-- **Seedbox** — protocol, host, port, username, password
+- **Remote server** — protocol, host, port, username, password
 
-Saving the seedbox settings tests the connection *from the NAS*, because the NAS
-is the machine that has to reach the seedbox. A successful test from your Mac
+Saving those settings tests the connection *from the NAS*, because the NAS is the
+machine that has to reach the remote server. A successful test from your Mac
 would prove nothing about whether transfers will run.
 
 Credentials are stored on the NAS in `relay/data/seedbox.json` (mode 0600,
@@ -141,7 +142,7 @@ The relay writes into media volumes, so the guard rails are load-bearing:
 
 MIT — see [LICENSE](LICENSE).
 
-Not affiliated with FileZilla, rclone, AList, or any seedbox provider.
+Not affiliated with FileZilla, rclone, AList, or any hosting provider.
 
 ---
 
