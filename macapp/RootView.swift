@@ -450,7 +450,7 @@ private struct TopBar: View {
                         .resizable()
                         .renderingMode(.template)
                         .interpolation(.high)
-                        .frame(width: 15, height: 15)
+                        .frame(width: 17, height: 17)
                         .foregroundStyle(Color.primary.opacity(0.55))
                         .accessibilityLabel("Shuttle")
                 }
@@ -460,10 +460,13 @@ private struct TopBar: View {
                 ChromeButton(symbol: "gearshape", help: "Relay settings (⌘,)", action: onSettings)
                 Color.clear.frame(width: 4, height: 1)
             }
-            // Content sits in a band twice the traffic-light centre and pinned to the
-            // top, so its vertical centre coincides with the buttons exactly.
-            .frame(height: max(26, Theme.trafficLightCenterY * 2))
-            .frame(maxHeight: .infinity, alignment: .top)
+            // Centred in the BAR, not on the traffic lights, which left ~12pt of
+            // dead space underneath and read as top-heavy.
+            //
+            // maxHeight is required, not optional: the enclosing ZStack aligns
+            // .bottom (the loading bar hangs off the bar's lower edge), so a row
+            // with no height of its own drops to the bottom instead of centring.
+            .frame(maxHeight: .infinity)
         }
         .frame(height: Theme.barHeight)
     }
