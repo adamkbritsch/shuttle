@@ -244,6 +244,27 @@ func humanETA(_ seconds: Int) -> String {
     return "\(h)h\(m % 60)m"
 }
 
+/// What the AppKit menu bar needs to know about the SwiftUI tree in order to grey
+/// items out honestly.
+///
+/// Deliberately a small snapshot rather than a reference to the stores: the menu and
+/// the view tree stay decoupled — commands travel one way as notifications (below),
+/// and this carries the answers back the other way without either side holding the
+/// other. Every custom item used to be permanently black, so ⌘⌫ with nothing
+/// transferring and ⌘↩ with nothing selected both looked live and did nothing.
+struct MenuFlags: Equatable {
+    var canSend = false
+    var canGoUp = false
+    var hasSelectedTransfer = false
+    var isLive = false
+}
+
+@MainActor
+final class MenuState {
+    static let shared = MenuState()
+    var flags = MenuFlags()
+}
+
 // Menu commands are posted as notifications so the AppKit menu bar and the SwiftUI
 // tree stay decoupled — neither has to hold a reference to the other.
 extension Notification.Name {

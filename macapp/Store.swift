@@ -399,9 +399,14 @@ final class BrowseStore: ObservableObject {
     }
 
     /// Falls back to the pane's root if the remembered path has gone away.
+    ///
+    /// Branches on reload's own outcome rather than on `entries.isEmpty`: once a
+    /// failed refresh started PRESERVING the previous rows, a remembered folder that
+    /// had been deleted left entries non-empty, so this never fired and the pane sat
+    /// on a directory that no longer exists.
     func restoreOrFallback() async {
-        await reload()
-        if entries.isEmpty, error != nil, path != rootPath {
+        let ok = await reload()
+        if !ok, path != rootPath {
             await go(to: rootPath)
         }
     }
@@ -420,45 +425,86 @@ final class BrowseStore: ObservableObject {
         return entries.filter { $0.name.lowercased().contains(q) }
     }
 
-    var selectedEntries: [Entry] { entries.filter { selection.contains($0.path) } }
+    /// Reads `visibleEntries`, not `entries`: the Table's selection is our own Set
+    /// and nothing prunes it when a row leaves the filter (typing deliberately never
+    /// triggers a listing), so selecting five and then filtering down to two used to
+    /// send all five. That contradicted the comment above and is the kind of surprise
+    /// that copies files you did not ask for.
+    var selectedEntries: [Entry] { visibleEntries.filter { selection.contains($0.path) } }
 
     // Status-line inputs. Client-side, which is what FileZilla does too.
     var dirCount: Int { entries.filter(\.isDir).count }
     var fileCount: Int { entries.filter { !$0.isDir }.count }
     var byteTotal: Int64 { entries.reduce(0) { $0 + ($1.isDir ? 0 : ($1.size ?? 0)) } }
 
-    func reload() async {
+    /// Bumped by every reload, so an answer that arrives after a newer request
+    /// started can be dropped instead of published.
+    ///
+    /// There is no in-flight guard here, deliberately — unlike `poll()`, a second
+    /// reload is usually the user navigating and must not be ignored. But the rows
+    /// stay clickable while a listing is in the air, so clicking folder A and then
+    /// folder B lets A's slower answer land second and publish A's rows while `path`
+    /// says B. A pane that disagrees with its own path bar is worse than one that
+    /// blanks, and it also stamped `loadedPath` with the wrong directory, which is
+    /// what the preserve-on-failure rule below keys off.
+    private var reloadGeneration = 0
+
+    /// Returns whether the listing actually succeeded, so callers do not have to
+    /// infer it from `entries.isEmpty` — which stopped being a reliable proxy once a
+    /// failed refresh started preserving the previous rows.
+    @discardableResult
+    func reload() async -> Bool {
+        reloadGeneration &+= 1
+        let mine = reloadGeneration
+        // Captured, because `path` is mutable and this function suspends: `go(to:)`
+        // sets it and calls straight in here, so by the time the answer lands it may
+        // already describe a different directory.
+        let requested = path
+
         loading = true
         error = nil
-        defer { loading = false }
         // 5000 is api.py's own BROWSE_LIMIT_MAX. Asking for it keeps the status
         // line's file/directory breakdown honest past the default 1000.
+        let result = await api.browse(requested, limit: 5000)
+
+        // Something newer is already in flight; it owns the pane now.
+        guard mine == reloadGeneration else { return false }
+        loading = false
+
         // A refresh that fails must not replace a perfectly good listing with
         // nothing. Losing the relay for one poll used to blank the pane, and the
         // recovery was to navigate away and back. Only a listing for a DIFFERENT
         // directory clears the rows, because then what is on screen really is wrong.
         func fail(_ why: String) {
             error = why
-            if loadedPath != path {
+            if loadedPath != requested {
                 entries = []
                 truncatedTotal = nil
             }
         }
 
-        switch await api.browse(path, limit: 5000) {
+        var ok = false
+        switch result {
         case .listing(let l):
             entries = l.entries
             truncatedTotal = l.truncated ? l.total : nil
-            loadedPath = path
+            loadedPath = requested
+            // Cleared on success too, not only on entry: an overlapping reload that
+            // failed would otherwise leave its banner sitting over a good listing,
+            // and both the filter reset and the path persistence below are gated on
+            // `error` being nil.
+            error = nil
+            ok = true
         case .refused(let why): fail(why)
         case .unauthorized: fail("Token rejected")
         case .unreachable(let why): fail(why)
         }
         selection = selection.filter { p in entries.contains { $0.path == p } }
         // Only reset the filter when the rows actually changed underneath it.
-        if error == nil { filter = "" }
-        noteRecent(path)
-        if error == nil { UserDefaults.standard.set(path, forKey: pathKey) }
+        if ok { filter = "" }
+        noteRecent(requested)
+        if ok { UserDefaults.standard.set(requested, forKey: pathKey) }
+        return ok
     }
 
     private func noteRecent(_ p: String) {

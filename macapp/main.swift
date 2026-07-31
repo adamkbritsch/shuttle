@@ -192,13 +192,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = main
     }
 
+    /// AppKit asks before drawing each item. Without this every custom item is
+    /// permanently enabled, which is how ⌘⌫ stayed black with nothing transferring
+    /// and ⌘↩ stayed black with nothing selected.
+    ///
+    /// The View-menu toggles and Reset Layout are deliberately absent: they are
+    /// always meaningful, so falling through to `true` is correct for them.
+    /// `assumeIsolated` rather than marking this @MainActor: menu validation is an
+    /// informal AppKit protocol, and AppKit only ever calls it on the main thread.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        MainActor.assumeIsolated {
+            switch item.action {
+            case #selector(sendToNAS):    return MenuState.shared.flags.canSend
+            case #selector(goUp):         return MenuState.shared.flags.canGoUp
+            case #selector(refresh):      return MenuState.shared.flags.isLive
+            case #selector(stopTransfer): return MenuState.shared.flags.hasSelectedTransfer
+            default:                      return true
+            }
+        }
+    }
+
     // Menu commands are posted as notifications so the AppKit menu bar and the
     // SwiftUI tree stay decoupled.
     @objc private func openSettings() { NotificationCenter.default.post(name: .shuttleSettings, object: nil) }
-    @objc private func refresh() { NotificationCenter.default.post(name: .shuttleRefresh, object: nil) }
-    @objc private func sendToNAS() { NotificationCenter.default.post(name: .shuttleSend, object: nil) }
-    @objc private func goUp() { NotificationCenter.default.post(name: .shuttleUp, object: nil) }
-    @objc private func stopTransfer() { NotificationCenter.default.post(name: .shuttleCancel, object: nil) }
+    @objc func refresh() { NotificationCenter.default.post(name: .shuttleRefresh, object: nil) }
+    @objc func sendToNAS() { NotificationCenter.default.post(name: .shuttleSend, object: nil) }
+    @objc func goUp() { NotificationCenter.default.post(name: .shuttleUp, object: nil) }
+    @objc func stopTransfer() { NotificationCenter.default.post(name: .shuttleCancel, object: nil) }
     @objc private func toggleSourceTree() { NotificationCenter.default.post(name: .shuttleToggleSourceTree, object: nil) }
     @objc private func toggleDestTree() { NotificationCenter.default.post(name: .shuttleToggleDestTree, object: nil) }
     @objc private func toggleQueue() { NotificationCenter.default.post(name: .shuttleToggleQueue, object: nil) }

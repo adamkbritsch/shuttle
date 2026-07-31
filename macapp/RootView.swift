@@ -20,6 +20,9 @@ struct RootView: View {
     @State private var deleting: PendingDelete?
     @State private var deleteStat: StatResult?
     @State private var bulkRenaming: PendingBulkRename?
+    /// Which side the user last acted on, so a global shortcut acts where they are
+    /// looking. Selection and navigation are the only two ways to "be" in a pane.
+    @State private var activePane: BrowseStore.Mode = .seedbox
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -173,12 +176,24 @@ struct RootView: View {
             store.startPolling()
         }
         .onReceive(NotificationCenter.default.publisher(for: .shuttleSettings)) { _ in showSettings = true }
+        .modifier(MenuBridge(flags: menuFlags,
+                             sourceSelection: seedbox.selection, sourcePath: seedbox.path,
+                             destSelection: dest.selection, destPath: dest.path,
+                             activePane: $activePane))
         .onReceive(NotificationCenter.default.publisher(for: .shuttleRefresh)) { _ in
             Task { await refreshAll() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .shuttleSend)) { _ in trySend() }
         .onReceive(NotificationCenter.default.publisher(for: .shuttleUp)) { _ in
-            Task { await seedbox.goUp() }
+            // Whichever pane you last touched, not always the source. The
+            // destination pane's own up-button advertises this shortcut in its
+            // tooltip, and pressing it used to move the OTHER pane.
+            let pane = activePane == .seedbox ? seedbox : dest
+            guard pane.canGoUp else {
+                store.show("Already at the top of that side", isError: false)
+                return
+            }
+            Task { await pane.goUp() }
         }
         // A selection that is only ever SET goes stale the moment the job it points
         // at finishes: the row stays highlighted in the Successful tab, implying it
@@ -404,7 +419,28 @@ struct RootView: View {
         !seedbox.selectedEntries.isEmpty && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
     }
 
-    private func trySend() { enqueue(seedbox.selectedEntries) }
+    /// Everything the menu bar validates against, as one Equatable value so a single
+    /// onChange keeps all four in step.
+    private var menuFlags: MenuFlags {
+        var f = MenuFlags()
+        f.canSend = canSend
+        f.canGoUp = (activePane == .seedbox ? seedbox : dest).canGoUp
+        f.hasSelectedTransfer = selectedTransfer != nil || store.active.count == 1
+        if case .live = store.status { f.isLive = true }
+        return f
+    }
+
+    private func trySend() {
+        // ⌘↩ with nothing selected used to return silently from enqueue's guard —
+        // no toast, no sheet, nothing. Same precedent as the ⌘⌫ handler above.
+        guard !seedbox.selectedEntries.isEmpty else {
+            store.show(seedbox.selection.isEmpty
+                       ? "Select something on the left first, then press ⌘↩"
+                       : "Everything selected is hidden by the filter", isError: false)
+            return
+        }
+        enqueue(seedbox.selectedEntries)
+    }
 
     /// The one path every "add to queue" goes through: the Send button, ⌘↩, the file
     /// list's context menu and the tree's.
@@ -960,4 +996,31 @@ struct PendingBulkRename: Identifiable {
     let existingNames: Set<String>
     let truncated: Bool
     var id: String { items.map(\.path).joined(separator: "\u{0000}") }
+}
+
+
+/// Groups the menu-bar and active-pane observers into a SINGLE modifier.
+///
+/// Not tidiness: RootView's body is one long modifier chain, and adding five more
+/// `.onChange`s to it directly tipped the type checker past its budget — "unable to
+/// type-check this expression in reasonable time". One modifier costs the chain one
+/// slot no matter how many observers hang off it.
+private struct MenuBridge: ViewModifier {
+    let flags: MenuFlags
+    let sourceSelection: Set<String>
+    let sourcePath: String
+    let destSelection: Set<String>
+    let destPath: String
+    @Binding var activePane: BrowseStore.Mode
+
+    func body(content: Content) -> some View {
+        content
+            // Keeps the AppKit menu honest. Derived from what SwiftUI just recomputed,
+            // so there is no second source of truth to drift.
+            .onChange(of: flags) { _, f in MenuState.shared.flags = f }
+            .onChange(of: sourceSelection) { _, _ in activePane = .seedbox }
+            .onChange(of: sourcePath) { _, _ in activePane = .seedbox }
+            .onChange(of: destSelection) { _, _ in activePane = .destinations }
+            .onChange(of: destPath) { _, _ in activePane = .destinations }
+    }
 }

@@ -38,6 +38,7 @@ extension Entry {
     var sortSize: Int64 { isDir ? -1 : (size ?? 0) }
     var sortDate: Double { mtime ?? 0 }
     var sortName: NaturalName { NaturalName(name) }
+    var sortKind: NaturalName { NaturalName(kindLabel) }
 }
 
 /// A name that sorts the way Finder sorts, wrapped so it can still be reached
@@ -149,7 +150,7 @@ struct FileTable: View {
                 .alignment(.trailing)
                 .customizationID("size")
 
-                TableColumn("Filetype", sortUsing: KeyPathComparator(\Entry.kindLabel)) { e in
+                TableColumn("Filetype", sortUsing: KeyPathComparator(\Entry.sortKind)) { e in
                     Text(e.kindLabel).font(.system(size: 11.5)).lineLimit(1)
                 }
                 .width(min: 70, ideal: 120)
@@ -261,12 +262,31 @@ struct FileTable: View {
         return ext.isEmpty ? folder : folder + "." + ext
     }
 
+    /// Whether the rows in this pane are deep enough for the relay to act on them.
+    ///
+    /// The same rule DirTreeView applies by node depth, expressed in the pane's own
+    /// terms: the rows are one level below `browse.path`, so they are actionable
+    /// exactly when the pane itself is at least one level inside its root.
+    ///
+    /// Destination: `/queue` is the LIST of drop targets, not a target, so its rows
+    /// are whole media volumes — validate_rename and validate_delete refuse them
+    /// ("that is a volume, not something inside one") and validate_mkdir refuses
+    /// `/queue` as a parent. Source: the relay refuses anything shallower than an
+    /// individual release (MIN_SRC_DEPTH = 2 under /seedbox), so at the seedbox root
+    /// the rows are library levels rather than releases. Both boundaries were checked
+    /// against the live relay, not read off the guard source.
+    private var rowsAreActionable: Bool {
+        let base = browse.mode == .seedbox ? "/seedbox" : "/queue"
+        guard browse.path.hasPrefix(base) else { return false }
+        return !browse.path.dropFirst(base.count).split(separator: "/").isEmpty
+    }
+
     @ViewBuilder
     private func rowMenu(for items: [Entry], ordered: [Entry] = []) -> some View {
         if items.isEmpty {
             backgroundMenu
         } else {
-            if browse.mode == .seedbox {
+            if browse.mode == .seedbox, rowsAreActionable {
                 Button(addLabel(items)) { onAddToQueue(items) }
                 // Movies whose useful metadata lives on the folder, not the file:
                 // Some.Film.2024.2160p.BluRay-GROUP/movie.mkv. Offered for one file
@@ -291,7 +311,7 @@ struct FileTable: View {
             // the plain rename sheet while several get the bulk one (which derives a
             // distinct name per item), New Folder wants no selection at all, and
             // deleting is happy with any number.
-            if browse.mode == .destinations {
+            if browse.mode == .destinations, rowsAreActionable {
                 if items.count == 1, let e = items.first {
                     Button("Rename…") { onRename(e) }
                 } else if items.count > 1 {
