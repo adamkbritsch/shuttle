@@ -2,18 +2,18 @@
   <img src="docs/assets/shuttle-lockup-v3.png" alt="Shuttle" width="300">
 </p>
 
-A pared-back, FileZilla-shaped client for moving files from a remote server onto a
-NAS — where the part that actually does the copying lives somewhere other than the
-machine you're clicking on.
+A pared-back, FileZilla-shaped client for bringing files home from a remote server
+to your NAS — where the thing doing the carrying is never the machine you're
+clicking on.
 
 ![Shuttle: the remote server on the left, NAS volumes on the right, transfers below](docs/screenshot.png)
 
 ## Why
 
 FileZilla's two-pane layout is the right shape for this job. Its engine is in the
-wrong place. Point FileZilla at a remote server and a NAS and every byte detours
-through whatever laptop happens to have the window open — twice over the same
-Wi-Fi, at the mercy of the lid staying up.
+wrong place. Point FileZilla at a remote server and a NAS and nothing comes home
+directly: every byte detours through whatever laptop has the window open, twice
+over the same Wi-Fi, for exactly as long as the lid stays up.
 
 The common fix is to mount the remote server on the NAS and copy locally. That
 works, and leaves you maintaining a FUSE mount and a mirror of a filesystem you
@@ -21,9 +21,10 @@ never wanted a copy of.
 
 Shuttle keeps the interface and relocates the engine. The panes, the queue, the
 draggable splitters and the transfer list all behave roughly the way you expect,
-but nothing is transferred by the app: a small service on the NAS talks straight
-to the remote server and streams server-to-server. Your Mac sends instructions
-and renders progress. Close the lid mid-copy and the copy carries on.
+but the app itself never carries anything: a small service on the NAS goes and
+fetches, straight from the remote server. Your Mac points at what should come
+home and watches it arrive. Close the lid mid-run and the run carries on without
+you.
 
 It is deliberately smaller than FileZilla. Two panes, one queue, no site manager,
 no protocol zoo, no delete.
@@ -40,15 +41,15 @@ The cost of that generality is that the operation has to be assembled each time 
 choose a storage, navigate it, select, find the copy action, pick a target
 storage, navigate that. Shuttle only does one thing, so there is nothing to
 assemble: the two panes are already the two ends of the transfer, and the only
-verb is Send.
+verb is to **come home**.
 
 ## How it fits together
 
 ```
   macOS app  ──HTTP──▶  relay (Docker, on the NAS)  ──rclone──▶  remote server
    Shuttle              browse · queue · progress                FTPS/FTP/SFTP
-   the controls               │                                  the source
-                              └──writes──▶  your media volumes
+   the controls               │                                  out there
+                              └──writes──▶  home: your media volumes
 ```
 
 - **`macapp/`** — SwiftUI, built with plain `swiftc`. No Xcode project.
@@ -109,8 +110,8 @@ is no `rclone.conf` to maintain.
 
 - **Two-pane browsing** with draggable, persisted splitters, sortable columns and
   a directory tree per side.
-- **Server-to-server transfers** with live progress, cancel, and a queue depth you
-  can cap.
+- **Server-to-server transfers** — the NAS fetches, the Mac watches. Live progress,
+  cancel, and a queue depth you can cap.
 - **Conflict handling.** When files already exist at the destination it asks
   instead of overwriting, offering FileZilla's actions: overwrite, overwrite if
   newer, overwrite if size differs, overwrite if size differs or newer, rename, or
@@ -124,8 +125,8 @@ is no `rclone.conf` to maintain.
 file from zero. Rather than offer a button that lies about what will happen, the
 option is absent.
 
-**Delete.** There is no delete anywhere in the app. It moves things into your
-library; unmaking that decision is your file manager's job.
+**Delete.** There is no delete anywhere in the app. It brings things home; sending
+them away again is your file manager's job.
 
 ## Safety
 
