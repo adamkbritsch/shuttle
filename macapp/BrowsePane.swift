@@ -15,6 +15,7 @@ struct BrowsePane: View {
     var onRename: (Entry) -> Void = { _ in }
     var onDelete: (Entry) -> Void = { _ in }
     var onNewFolder: () -> Void = { }
+    var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -45,7 +46,8 @@ struct BrowsePane: View {
                           destinationName: destinationName,
                           onRename: onRename,
                           onDelete: onDelete,
-                          onNewFolder: onNewFolder)
+                          onNewFolder: onNewFolder,
+                          onQueueRenamed: onQueueRenamed)
                 if let error = browse.error {
                     Text(error)
                         .font(.system(size: 10.5))

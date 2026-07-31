@@ -320,8 +320,9 @@ struct RootView: View {
                                onAddToQueue: { enqueue($0) },
                                destinationName: destinationLabel,
                                onRename: { beginRename($0) },
-                    onDelete: { beginDelete($0) },
-                    onNewFolder: { beginNewFolder(dest.path) })
+                               onDelete: { beginDelete($0) },
+                               onNewFolder: { beginNewFolder(dest.path) },
+                               onQueueRenamed: { e, name in enqueue([e], as: name) })
                     footer()
                 }
             },
@@ -352,7 +353,17 @@ struct RootView: View {
 
     /// The one path every "add to queue" goes through: the Send button, ⌘↩, the file
     /// list's context menu and the tree's.
-    private func enqueue(_ sources: [Entry]) {
+    /// `as` renames the item on arrival. It is applied at ENQUEUE, as the job's
+    /// destination name, not as a rename afterwards.
+    ///
+    /// That is deliberate and it is the safer of the two. Setting the name up front
+    /// means the conflict check runs against the name the file will actually have,
+    /// so a clash is caught before anything moves. Transferring first and renaming
+    /// after would discover the clash only once the bytes had landed — a failed
+    /// rename at the end of a 40GB copy, with the file sitting under the wrong name.
+    /// rclone writes straight to the final name either way, so the end state is
+    /// identical.
+    private func enqueue(_ sources: [Entry], as destName: String? = nil) {
         guard !sources.isEmpty else { return }
         guard dest.path != "/queue", dest.path.hasPrefix("/queue/") else {
             store.show("Pick a destination folder first — /queue itself is the list of volumes",
@@ -370,7 +381,8 @@ struct RootView: View {
                 // Nil policy means "ask": the relay scans the destination and answers
                 // 409 rather than silently overwriting.
                 let report = await store.send(src: src.path, destDir: destPath,
-                                              onConflict: conflictPolicy)
+                                              onConflict: conflictPolicy,
+                                              destName: destName)
                 if let report {
                     // Park the rest of the selection behind the sheet: answering it
                     // resumes them with whatever was chosen.

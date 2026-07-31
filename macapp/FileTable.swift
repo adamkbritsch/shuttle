@@ -55,6 +55,7 @@ struct FileTable: View {
     var onRename: (Entry) -> Void = { _ in }
     var onDelete: (Entry) -> Void = { _ in }
     var onNewFolder: () -> Void = { }
+    var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
 
     @State private var sortOrder = [KeyPathComparator(\Entry.name)]
     @State private var customization = TableColumnCustomization<Entry>()
@@ -207,6 +208,19 @@ struct FileTable: View {
         .background(Color(nsColor: .textBackgroundColor).opacity(0.001))
     }
 
+    /// The parent folder's name carrying this file's extension, or nil when there
+    /// is nothing useful to take. Nil for a file sitting directly in the source
+    /// root, where the parent is the root itself and naming a film after it would
+    /// be worse than leaving it alone.
+    private func parentFolderName(for entry: Entry) -> String? {
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        guard parent != browse.rootPath, parent != "/" else { return nil }
+        let folder = (parent as NSString).lastPathComponent
+        guard !folder.isEmpty, folder != "." else { return nil }
+        let ext = (entry.name as NSString).pathExtension
+        return ext.isEmpty ? folder : folder + "." + ext
+    }
+
     @ViewBuilder
     private func rowMenu(for items: [Entry]) -> some View {
         if items.isEmpty {
@@ -214,6 +228,16 @@ struct FileTable: View {
         } else {
             if browse.mode == .seedbox {
                 Button(addLabel(items)) { onAddToQueue(items) }
+                // Movies whose useful metadata lives on the folder, not the file:
+                // Some.Film.2024.2160p.BluRay-GROUP/movie.mkv. Offered for one file
+                // at a time — two files in the same folder would both want the same
+                // name — and only when there is a real parent to take a name from.
+                if items.count == 1, let e = items.first, !e.isDir,
+                   let renamed = parentFolderName(for: e) {
+                    Button("Rename to Parent Folder Name") {
+                        onQueueRenamed(e, renamed)
+                    }
+                }
                 Divider()
             }
             if items.count == 1, let e = items.first, e.isDir {

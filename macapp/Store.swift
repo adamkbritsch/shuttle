@@ -311,7 +311,10 @@ final class BrowseStore: ObservableObject {
     private weak var store: RelayStore?
 
     private var pathKey: String { "browse.path.\(mode == .seedbox ? "source" : "dest")" }
-    private var rootPath: String { mode == .seedbox ? "/seedbox/downloads" : "/queue" }
+    /// Not private: the row menu needs it to tell a file sitting in a release
+    /// folder from one loose at the source root, where the "parent" carries no
+    /// information about the film.
+    var rootPath: String { mode == .seedbox ? "/seedbox/downloads" : "/queue" }
 
     init(mode: Mode, api: RelayAPI, store: RelayStore) {
         self.mode = mode
