@@ -23,7 +23,7 @@ home and watches it arrive. Close the lid mid-run and the run carries on without
 you.
 
 It is deliberately smaller than FileZilla. Two panes, one queue, no site manager,
-no protocol zoo, no delete.
+no protocol zoo.
 
 ### Prior art
 
@@ -114,15 +114,22 @@ is no `rclone.conf` to maintain.
   skip. Each maps to the rclone flag that implements it.
 - **Deferred rename.** Rename something mid-transfer and it is applied when the
   copy finishes — surviving both a closed laptop and a relay restart.
+- **Housekeeping on the NAS side** — rename, delete, and create folders from the
+  right-click menu, so a landing folder can be tidied without opening Finder.
+  Delete confirms with the file count and size, and is refused outright while a
+  transfer is writing into that path.
+- **Retry** a failed transfer from the Failed tab: it re-queues the same source and
+  destination rather than making you find them again.
+- **Free space** shown for the destination volume, so the number that would
+  otherwise arrive as a rejection is visible before you queue anything.
+- **Filter** either pane. Client-side over the listing already fetched, so typing
+  never triggers a fresh directory read.
 
-### Two things it deliberately does not do
+### One thing it deliberately does not do
 
 **Resume.** FileZilla offers "resume file transfer"; rclone restarts an interrupted
 file from zero. Rather than offer a button that lies about what will happen, the
 option is absent.
-
-**Delete.** There is no delete anywhere in the app. It brings things home; sending
-them away again is your file manager's job.
 
 ## Safety
 

@@ -53,6 +53,8 @@ struct FileTable: View {
     var destinationName: String = ""
     /// NAS side only: ask to rename this item.
     var onRename: (Entry) -> Void = { _ in }
+    var onDelete: (Entry) -> Void = { _ in }
+    var onNewFolder: () -> Void = { }
 
     @State private var sortOrder = [KeyPathComparator(\Entry.name)]
     @State private var customization = TableColumnCustomization<Entry>()
@@ -74,7 +76,7 @@ struct FileTable: View {
     }
 
     private var rows: [Entry] {
-        let sorted = browse.entries.sorted(using: sortOrder)
+        let sorted = browse.visibleEntries.sorted(using: sortOrder)
             .sorted { a, b in
                 if a.isDir != b.isDir { return a.isDir }
                 return false      // stable: keeps sorted(using:) order within a group
@@ -170,7 +172,7 @@ struct FileTable: View {
     /// Resolves against the REAL entries, so ".." can never end up in a selection
     /// or be handed to the enqueue path.
     private func resolve(_ paths: Set<String>) -> [Entry] {
-        browse.entries.filter { paths.contains($0.path) }
+        browse.visibleEntries.filter { paths.contains($0.path) }
     }
 
     private var emptyState: some View {
@@ -209,6 +211,9 @@ struct FileTable: View {
             // menu simply does not offer it rather than offering a guaranteed error.
             if browse.mode == .destinations, items.count == 1, let e = items.first {
                 Button("Rename…") { onRename(e) }
+                Button("New Folder…") { onNewFolder() }
+                Divider()
+                Button("Delete…", role: .destructive) { onDelete(e) }
             }
             if items.count == 1 { Divider() }
             Button(items.count == 1 ? "Copy Path" : "Copy \(items.count) Paths") {

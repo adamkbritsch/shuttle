@@ -97,6 +97,8 @@ struct DirTreeView: View {
     /// The destination a queued folder would land in, for the menu wording.
     var destinationName: String = ""
     var onRename: (Entry) -> Void = { _ in }
+    var onDelete: (Entry) -> Void = { _ in }
+    var onNewFolder: (String) -> Void = { _ in }
 
     var body: some View {
         ScrollView {
@@ -174,6 +176,12 @@ struct DirTreeView: View {
                 if browse.mode == .destinations {
                     Button("Rename…") {
                         onRename(Entry(name: name, path: path, isDir: true,
+                                       size: nil, mtime: nil))
+                    }
+                    Button("New Folder…") { onNewFolder(path) }
+                    Divider()
+                    Button("Delete…", role: .destructive) {
+                        onDelete(Entry(name: name, path: path, isDir: true,
                                        size: nil, mtime: nil))
                     }
                 }

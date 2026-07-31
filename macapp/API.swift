@@ -12,6 +12,7 @@ enum ActionResult { case ok(String); case refused(String); case unauthorized; ca
 /// `conflict` carries the relay's 409: it refused, and wants an on_conflict policy.
 enum EnqueueResult { case ok(String); case conflict(ConflictReport); case refused(String); case unauthorized; case unreachable(String) }
 enum LogResult { case text(String); case unreachable(String) }
+enum StatResultOutcome { case stat(StatResult); case refused(String); case unreachable(String) }
 enum SeedboxResult { case config(SeedboxConfig); case unreachable(String) }
 enum SeedboxSaveResult { case saved(SeedboxConfig, SeedboxProbe?); case failed(String); case unreachable(String) }
 enum SettingsResult { case settings(RelaySettings); case refused(String); case unreachable(String) }
@@ -249,6 +250,51 @@ actor RelayAPI {
                 return .saved(ok.seedbox, ok.probe)
             }
             return .failed(serverMessage(data) ?? "Relay answered \(code)")
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    func stat(_ path: String) async -> StatResultOutcome {
+        guard let r = request("v1/stat?path=" + (path.addingPercentEncoding(
+                withAllowedCharacters: .urlQueryAllowed) ?? path)) else {
+            return .unreachable("Bad base URL")
+        }
+        do {
+            let (data, resp) = try await session.data(for: r)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200, let s = try? JSONDecoder().decode(StatResult.self, from: data) {
+                return .stat(s)
+            }
+            return .refused(serverMessage(data) ?? "Relay answered \(code)")
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    func delete(_ path: String) async -> ActionResult {
+        await simplePost("v1/delete", ["path": path], ok: "Deleted")
+    }
+
+    func mkdir(parent: String, name: String) async -> ActionResult {
+        await simplePost("v1/mkdir", ["parent": parent, "name": name],
+                         ok: "Created \(name)")
+    }
+
+    func retry(_ id: Int) async -> ActionResult {
+        await simplePost("v1/jobs/\(id)/retry", [:], ok: "Queued again")
+    }
+
+    /// Shared shape for the small write endpoints: POST, treat any 4xx/5xx as a
+    /// refusal carrying the relay's own message, and force the next poll.
+    private func simplePost(_ p: String, _ body: [String: String],
+                            ok: String) async -> ActionResult {
+        guard let r = request(p, method: "POST", body: body) else {
+            return .unreachable("Bad base URL")
+        }
+        jobsETag = nil
+        do {
+            let (data, resp) = try await session.data(for: r)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 401 { return .unauthorized }
+            if code >= 400 { return .refused(serverMessage(data) ?? "Relay answered \(code)") }
+            return .ok(ok)
         } catch { return .unreachable(RelayAPI.describe(error)) }
     }
 

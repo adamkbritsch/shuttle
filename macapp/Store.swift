@@ -194,6 +194,30 @@ final class RelayStore: ObservableObject {
         return pending
     }
 
+    func statFor(_ path: String) async -> StatResult? {
+        if case .stat(let s) = await api.stat(path) { return s }
+        return nil
+    }
+
+    /// True when it actually went, so the caller knows whether to reload a listing.
+    func delete(_ path: String) async -> Bool { await write(await api.delete(path)) }
+    func mkdir(parent: String, name: String) async -> Bool {
+        await write(await api.mkdir(parent: parent, name: name))
+    }
+    func retry(_ id: Int) async -> Bool { await write(await api.retry(id)) }
+
+    private func write(_ r: ActionResult) async -> Bool {
+        var ok = false
+        switch r {
+        case .ok(let m): show(m, isError: false); ok = true
+        case .refused(let why): show(why, isError: true)
+        case .unauthorized: status = .offline(.unauthorized); show("Token rejected", isError: true)
+        case .unreachable(let why): show(why, isError: true)
+        }
+        await poll(force: true)
+        return ok
+    }
+
     func cancel(_ id: Int) async { await act(id, "cancel") }
     func dismiss(_ id: Int) async { await act(id, "dismiss") }
 
@@ -234,6 +258,9 @@ final class BrowseStore: ObservableObject {
 
     @Published private(set) var path: String
     @Published private(set) var entries: [Entry] = []
+    /// Narrows what the table shows. Purely client-side over the page already
+    /// fetched -- it never re-queries, so it cannot cost a cold listing.
+    @Published var filter = ""
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published var selection = Set<String>()
@@ -274,6 +301,14 @@ final class BrowseStore: ObservableObject {
 
     /// Selected rows, in the order they appear in the listing rather than in
     /// selection order, so a multi-item send is predictable.
+    /// Entries after the filter. Everything user-facing reads THIS, so a hidden row
+    /// can never be selected, sent, renamed or deleted by accident.
+    var visibleEntries: [Entry] {
+        let q = filter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return entries }
+        return entries.filter { $0.name.lowercased().contains(q) }
+    }
+
     var selectedEntries: [Entry] { entries.filter { selection.contains($0.path) } }
 
     // Status-line inputs. Client-side, which is what FileZilla does too.
@@ -296,6 +331,7 @@ final class BrowseStore: ObservableObject {
         case .unreachable(let why): entries = []; error = why; truncatedTotal = nil
         }
         selection = selection.filter { p in entries.contains { $0.path == p } }
+        filter = ""                       // a filter from the last folder is noise here
         noteRecent(path)
         if error == nil { UserDefaults.standard.set(path, forKey: pathKey) }
     }

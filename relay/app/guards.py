@@ -154,6 +154,52 @@ def validate_request(src: str, dest_dir: str, dest_name: str):
     return src, dest_dir, dest_name
 
 
+def validate_delete(path: str, require_exists: bool = True) -> str:
+    """Gate for deleting something that landed on the NAS.
+
+    Same shape as validate_rename, and for the same reasons: the remote side is
+    read-only and deleting there would break a torrent that is still seeding, a
+    drop-target ROOT is a volume rather than something inside one, and a path that
+    is not under a drop target is not ours to touch.
+    """
+    src = os.path.normpath(path)
+
+    if under(src, SEEDBOX):
+        raise JobError("the seedbox is read-only -- Shuttle never deletes there")
+    if resolve_drop_target(src) is None:
+        raise JobError(f"{to_virtual(src)} is not somewhere this can delete")
+    if src in drop_targets():
+        raise JobError("that is a whole volume, not something inside one")
+    # Existence is checked LAST and optionally, so the caller can run its
+    # in-flight-transfer check first. A destination rclone has not created yet is
+    # "missing" and "being written to" at the same time, and the second is the
+    # answer the user needs.
+    if require_exists and not os.path.exists(src):
+        raise JobError(f"no such item: {to_virtual(src)}")
+    return src
+
+
+def validate_mkdir(parent: str, name: str) -> str:
+    """Gate for creating a folder on the NAS. The parent MAY be a volume root --
+    making a folder inside a volume is the normal case; renaming or deleting one
+    is not."""
+    par = os.path.normpath(parent)
+
+    if under(par, SEEDBOX):
+        raise JobError("the seedbox is read-only -- create folders on the NAS side")
+    if resolve_drop_target(par) is None:
+        raise JobError(f"{to_virtual(par)} is not somewhere this can create folders")
+    if not os.path.isdir(par):
+        raise JobError(f"no such folder: {to_virtual(par)}")
+    if (name in _BAD_NAME or "/" in name or any(ord(c) < 32 for c in name)):
+        raise JobError("the folder name must be a single path component")
+
+    dest = os.path.join(par, name)
+    if os.path.exists(dest):
+        raise JobError(f"{name} already exists here")
+    return dest
+
+
 def validate_rename(path: str, new_name: str, require_exists: bool = True):
     """Gate for renaming something that already landed on the NAS.
 

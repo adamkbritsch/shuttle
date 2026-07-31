@@ -47,6 +47,7 @@ struct TransfersPane: View {
                                 JobRow(job: job,
                                        onCancel: { Task { await store.cancel(job.id) } },
                                        onDismiss: { Task { await store.dismiss(job.id) } },
+                                       onRetry: { Task { _ = await store.retry(job.id) } },
                                        onLog: { openLog(job) },
                                        onVerify: { openVerify(job) })
                                 Divider().overlay(Theme.hairline.opacity(0.6))
@@ -161,6 +162,7 @@ private struct JobRow: View {
     let job: Job
     let onCancel: () -> Void
     let onDismiss: () -> Void
+    var onRetry: () -> Void = { }
     let onLog: () -> Void
     let onVerify: () -> Void
 
@@ -208,6 +210,10 @@ private struct JobRow: View {
                 if job.kind == .done {
                     ChromeButton(symbol: "checkmark.seal", help: "Verify file counts", action: onVerify)
                 }
+                if job.kind == .failed {
+                    ChromeButton(symbol: "arrow.clockwise",
+                                 help: "Queue this transfer again", action: onRetry)
+                }
                 ChromeButton(symbol: "doc.text", help: "Open the rclone log", action: onLog)
                 if !job.isActive {
                     ChromeButton(symbol: "eye.slash", help: "Clear from this list", action: onDismiss)
@@ -231,6 +237,7 @@ private struct JobRow: View {
             Button("Copy Destination Path") { copyText(job.destPath) }
             if !job.isActive {
                 Divider()
+                if job.kind == .failed { Button("Try Again", action: onRetry) }
                 Button("Remove from List", action: onDismiss)
             }
         }

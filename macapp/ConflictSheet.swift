@@ -173,3 +173,106 @@ struct ConflictSheet: View {
         .padding(.horizontal, 18).padding(.vertical, 14)
     }
 }
+
+/// Confirmation for an irreversible delete.
+///
+/// It asks the relay what is actually there first, so the sheet can say "47 files ·
+/// 22.4 GB" rather than just a name — the size is the thing that makes someone stop
+/// and check. Until that answer arrives the destructive button stays disabled, so a
+/// reflexive Return cannot fire before the stakes are on screen.
+struct DeleteSheet: View {
+    let entry: Entry
+    let stat: StatResult?
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "trash")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color(nsColor: .systemRed))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Delete \u{201C}\(entry.name)\u{201D}?")
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(2).truncationMode(.middle)
+                    Text(detail)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text((entry.path as NSString).deletingLastPathComponent)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.head)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 14)
+
+            Divider().overlay(Theme.hairline)
+
+            HStack(spacing: 10) {
+                Text("This cannot be undone.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Delete", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(nsColor: .systemRed))
+                    .disabled(stat == nil)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+        }
+        .frame(width: 460)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var detail: String {
+        guard let stat else { return "Checking what is there\u{2026}" }
+        if !stat.isDir { return humanBytes(stat.bytes) }
+        let f = stat.files == 1 ? "1 file" : "\(stat.files) files"
+        return "\(f) \u{00B7} \(humanBytes(stat.bytes))"
+    }
+}
+
+/// Creates a folder on the NAS side. The relay rejects a name with a slash or a
+/// dot-dot in it, so this only has to stop the obviously empty case.
+struct NewFolderSheet: View {
+    let parent: String
+    @Binding var name: String
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("New Folder").font(.system(size: 15, weight: .semibold))
+                Text("in \(parent)")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.head)
+            }
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
+
+            TextField("Folder name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .onSubmit { submit() }
+                .padding(.horizontal, 20)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Create") { submit() }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent)
+                    .disabled(trimmed.isEmpty)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+        }
+        .frame(width: 420)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
+    private func submit() { if !trimmed.isEmpty { onConfirm(trimmed) } }
+}

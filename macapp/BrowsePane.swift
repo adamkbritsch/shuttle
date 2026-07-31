@@ -13,6 +13,8 @@ struct BrowsePane: View {
     var onAddToQueue: ([Entry]) -> Void = { _ in }
     var destinationName: String = ""
     var onRename: (Entry) -> Void = { _ in }
+    var onDelete: (Entry) -> Void = { _ in }
+    var onNewFolder: () -> Void = { }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -41,7 +43,9 @@ struct BrowsePane: View {
                           paneKey: browse.mode == .seedbox ? "source" : "dest",
                           onAddToQueue: onAddToQueue,
                           destinationName: destinationName,
-                          onRename: onRename)
+                          onRename: onRename,
+                          onDelete: onDelete,
+                          onNewFolder: onNewFolder)
                 if let error = browse.error {
                     Text(error)
                         .font(.system(size: 10.5))
@@ -157,6 +161,26 @@ private struct PathBar: View {
                 .help("Recent folders")
             }
 
+            // Filter. Client-side over the page already fetched, so typing never
+            // triggers a listing -- a cold one costs over a second.
+            HStack(spacing: 4) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                TextField("Filter", text: $browse.filter)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .frame(width: 96)
+                if !browse.filter.isEmpty {
+                    Button { browse.filter = "" } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 6).frame(height: 21)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.pillFill))
+
             if browse.loading {
                 ProgressView().controlSize(.small).scaleEffect(0.65)
             }
@@ -176,7 +200,27 @@ private struct PathBar: View {
 }
 
 /// The destination pane's footer: what will happen, and the button that does it.
+/// Remaining space on the chosen destination volume, so the number that would
+/// otherwise arrive as a rejection ("not enough space") is visible beforehand.
+struct FreeSpaceLabel: View {
+    @ObservedObject var store: RelayStore
+    let destPath: String
+
+    var body: some View {
+        if let t = target, let free = t.freeBytes {
+            Text("\(humanBytes(free)) free")
+                .font(.system(size: 10.5))
+                .foregroundStyle(free < 20_000_000_000 ? Color(nsColor: .systemOrange) : .secondary)
+        }
+    }
+
+    private var target: Target? {
+        store.targets.first { destPath == $0.path || destPath.hasPrefix($0.path + "/") }
+    }
+}
+
 struct SendBar: View {
+    var store: RelayStore?
     let sources: [Entry]
     let destination: String
     let enabled: Bool
@@ -192,10 +236,13 @@ struct SendBar: View {
                         .lineLimit(1).truncationMode(.middle)
                     // The resolved destination, so there is never ambiguity about
                     // where something lands.
-                    Text("into \(destination)")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.head)
+                    HStack(spacing: 8) {
+                        Text("into \(destination)")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.head)
+                        if let store { FreeSpaceLabel(store: store, destPath: destination) }
+                    }
                 }
                 Spacer()
                 Button(action: action) {

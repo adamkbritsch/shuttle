@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import re
 import threading
 import time
@@ -47,7 +48,7 @@ LOG_TAIL_DEFAULT = 262144
 # mount would pile up threads all stuck in a syscall.
 _browse_slots = threading.BoundedSemaphore(8)
 
-_JOB_RE = re.compile(r"^/v1/jobs/(\d+)(?:/(cancel|dismiss|log|verify))?$")
+_JOB_RE = re.compile(r"^/v1/jobs/(\d+)(?:/(cancel|dismiss|log|verify|retry))?$")
 
 # Columns never sent to a client: src_remote leaks the rclone remote name and the
 # client has no use for it.
@@ -182,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._settings()
             if path == "/v1/seedbox":
                 return self._send(200, seedbox.public())
+            if path == "/v1/stat":
+                return self._stat()
             if path == "/v1/jobs":
                 return self._jobs()
             m = _JOB_RE.match(path)
@@ -208,11 +211,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._enqueue()
             if path == "/v1/rename":
                 return self._rename()
+            if path == "/v1/delete":
+                return self._delete()
+            if path == "/v1/mkdir":
+                return self._mkdir()
             if path == "/v1/settings":
                 return self._set_settings()
             if path == "/v1/seedbox":
                 return self._set_seedbox()
             m = _JOB_RE.match(path)
+            if m and m.group(2) == "retry":
+                return self._retry(int(m.group(1)))
             if m and m.group(2) in ("cancel", "dismiss"):
                 return self._job_action(int(m.group(1)), m.group(2))
         except JobError as exc:
@@ -411,6 +420,77 @@ class Handler(BaseHTTPRequestHandler):
         self.log(f"seedbox configured: {saved['protocol']}://{saved['host']}:{saved['port']} "
                  f"({probe['entries']} entries at root)")
         self._send(200, {"seedbox": saved, "ok": True, "probe": probe})
+
+    def _stat(self):
+        """Size and file count for one path, so the delete sheet can show what is
+        at stake before anything is removed."""
+        virtual = self._q().get("path", [None])[0]
+        if not virtual:
+            raise JobError("path is required")
+        real = guards.to_real(virtual)
+        if not os.path.exists(real):
+            return self._fail(404, f"no such item: {guards.to_virtual(real)}")
+        files, size = _walk_count(real)
+        self._send(200, {"path": guards.to_virtual(real),
+                         "is_dir": os.path.isdir(real),
+                         "files": files, "bytes": size})
+
+    def _delete(self):
+        """Remove something from the NAS. Irreversible, so the checks come first."""
+        body = self._body()
+        virtual = body.get("path")
+        if not virtual:
+            raise JobError("path is required")
+        src = guards.validate_delete(guards.to_real(virtual), require_exists=False)
+
+        # Never delete out from under a transfer. rclone would keep writing into a
+        # directory that no longer exists and the job would fail in a way that looks
+        # like a network fault. Overlap in EITHER direction counts: the job may be
+        # writing into this path, or into something that contains it.
+        for row in self.jobs.snapshot("queued", "running"):
+            target = os.path.join(row["dest_dir"], row["dest_name"])
+            if target == src or guards.under(target, src) or guards.under(src, target):
+                raise JobError(
+                    f"job {row['id']} is still transferring into "
+                    f"{guards.to_virtual(target)} -- cancel it first")
+
+        # Existence is only now worth asserting: everything above has ruled out the
+        # cases where "missing" would have been the wrong thing to say.
+        if not os.path.exists(src):
+            return self._fail(404, f"no such item: {guards.to_virtual(src)}")
+
+        files, size = _walk_count(src)
+        if os.path.isdir(src):
+            shutil.rmtree(src)
+        else:
+            os.remove(src)
+        self.log(f"deleted {guards.to_virtual(src)} ({files} files, {size} bytes)")
+        self._send(200, {"deleted": guards.to_virtual(src),
+                         "files": files, "bytes": size})
+
+    def _mkdir(self):
+        body = self._body()
+        parent, name = body.get("parent"), (body.get("name") or "").strip()
+        if not parent:
+            raise JobError("parent is required")
+        dest = guards.validate_mkdir(guards.to_real(parent), name)
+        os.mkdir(dest)
+        self.log(f"created folder {guards.to_virtual(dest)}")
+        self._send(201, {"path": guards.to_virtual(dest)})
+
+    def _retry(self, jid):
+        """Queue a fresh job with the same source and destination as a finished one."""
+        row = self._find(jid)
+        if row is None:
+            return self._fail(404, f"no job {jid}")
+        if row["state"] in ("queued", "running"):
+            raise JobError(f"job {jid} is still {row['state']}")
+        src, dest_dir, dest_name = guards.validate_request(
+            row["src_real"], row["dest_dir"], row["dest_name"])
+        new_id = self.jobs.enqueue(src, dest_dir, dest_name,
+                                   on_conflict=row["on_conflict"] or "overwrite")
+        self.log(f"retry of job {jid} queued as {new_id}")
+        self._send(201, {"id": new_id, "retry_of": jid})
 
     def _settings(self):
         import jobs as jobsmod

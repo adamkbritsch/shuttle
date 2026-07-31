@@ -305,3 +305,16 @@ enum SeedboxProtocol: String, CaseIterable, Identifiable {
     }
     var defaultPort: Int { self == .sftp ? 22 : 21 }
 }
+
+
+/// What a delete is about to remove, fetched before the confirm sheet so it can say.
+struct StatResult: Decodable, Equatable {
+    let path: String
+    let isDir: Bool
+    let files: Int
+    let bytes: Int64
+    enum CodingKeys: String, CodingKey {
+        case path, files, bytes
+        case isDir = "is_dir"
+    }
+}

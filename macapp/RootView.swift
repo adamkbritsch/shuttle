@@ -17,6 +17,10 @@ struct RootView: View {
     @State private var conflict: PendingConflict?
     /// Set by "always use this action", so the rest of a multi-item send stops asking.
     @State private var conflictPolicy: ConflictAction?
+    @State private var deleting: Entry?
+    @State private var deleteStat: StatResult?
+    @State private var newFolderParent: String?
+    @State private var newFolderName = ""
 
     init() {
         let s = RelayStore()
@@ -54,6 +58,35 @@ struct RootView: View {
                               if applyToAll, action != .rename { conflictPolicy = action }
                               Task { await resolve(pending, action: action, newName: newName) }
                           })
+        }
+        .sheet(item: $deleting) { entry in
+            DeleteSheet(entry: entry, stat: deleteStat,
+                        onCancel: { deleting = nil; deleteStat = nil },
+                        onConfirm: {
+                            let path = entry.path
+                            deleting = nil; deleteStat = nil
+                            Task {
+                                if await store.delete(path) {
+                                    await dest.reload()
+                                    destTree.refresh((path as NSString).deletingLastPathComponent)
+                                }
+                            }
+                        })
+        }
+        .sheet(isPresented: Binding(get: { newFolderParent != nil },
+                                    set: { if !$0 { newFolderParent = nil } })) {
+            NewFolderSheet(parent: newFolderParent ?? "", name: $newFolderName,
+                           onCancel: { newFolderParent = nil },
+                           onConfirm: { name in
+                               let parent = newFolderParent ?? ""
+                               newFolderParent = nil
+                               Task {
+                                   if await store.mkdir(parent: parent, name: name) {
+                                       await dest.reload()
+                                       destTree.refresh(parent)
+                                   }
+                               }
+                           })
         }
         .sheet(item: $renaming) { entry in
             RenameSheet(entry: entry, name: $renameDraft,
@@ -206,7 +239,8 @@ struct RootView: View {
                                           treeRoot: "/queue",
                                           // NAS volumes are a small, near-static set.
                                           startsCollapsed: false) {
-                                            SendBar(sources: seedbox.selectedEntries,
+                                            SendBar(store: store,
+                                                    sources: seedbox.selectedEntries,
                                                     destination: dest.path,
                                                     enabled: canSend,
                                                     action: trySend)
@@ -248,7 +282,9 @@ struct RootView: View {
                     BrowsePane(browse: browse, title: title,
                                onAddToQueue: { enqueue($0) },
                                destinationName: destinationLabel,
-                               onRename: { beginRename($0) })
+                               onRename: { beginRename($0) },
+                    onDelete: { beginDelete($0) },
+                    onNewFolder: { beginNewFolder(dest.path) })
                     footer()
                 }
             },
@@ -335,6 +371,19 @@ struct RootView: View {
             }
         }
         tab = .queued
+    }
+
+    /// Asks the relay what is actually there before showing the sheet, so the
+    /// confirmation can state the size and file count rather than just a name.
+    private func beginDelete(_ entry: Entry) {
+        deleteStat = nil
+        deleting = entry
+        Task { deleteStat = await store.statFor(entry.path) }
+    }
+
+    private func beginNewFolder(_ parent: String) {
+        newFolderName = ""
+        newFolderParent = parent
     }
 
     private func beginRename(_ entry: Entry) {
