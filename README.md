@@ -15,10 +15,6 @@ wrong place. Point FileZilla at a remote server and a NAS and nothing comes home
 directly: every byte detours through whatever laptop has the window open, twice
 over the same Wi-Fi, for exactly as long as the lid stays up.
 
-The common fix is to mount the remote server on the NAS and copy locally. That
-works, and leaves you maintaining a FUSE mount and a mirror of a filesystem you
-never wanted a copy of.
-
 Shuttle keeps the interface and relocates the engine. The panes, the queue, the
 draggable splitters and the transfer list all behave roughly the way you expect,
 but the app itself never carries anything: a small service on the NAS goes and
