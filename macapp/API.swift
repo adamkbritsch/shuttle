@@ -16,7 +16,7 @@ enum StatResultOutcome { case stat(StatResult); case refused(String); case unrea
 enum SeedboxResult { case config(SeedboxConfig); case unreachable(String) }
 enum SeedboxSaveResult { case saved(SeedboxConfig, SeedboxProbe?); case failed(String); case unreachable(String) }
 enum SettingsResult { case settings(RelaySettings); case refused(String); case unreachable(String) }
-enum RenameResult { case renamed(String); case deferred(String); case refused(String); case unreachable(String) }
+enum RenameResult { case renamed(String); case deferred(String); case refused(String); case unauthorized; case unreachable(String) }
 enum VerifyOutcome { case result(VerifyResult); case refused(String); case unreachable(String) }
 
 actor RelayAPI {
@@ -325,6 +325,7 @@ actor RelayAPI {
         do {
             let (data, resp) = try await session.data(for: r)
             guard let http = resp as? HTTPURLResponse else { return .unreachable("No response") }
+            if http.statusCode == 401 { return .unauthorized }
             if http.statusCode >= 400 {
                 return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
             }

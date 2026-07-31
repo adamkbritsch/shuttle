@@ -121,6 +121,8 @@ final class RelayStore: ObservableObject {
         switch await api.rename(path: path, newName: newName) {
         case .renamed(let n): show("Renamed to \(n)", isError: false); return true
         case .deferred(let msg): show(msg, isError: false); return false
+        case .unauthorized:
+            status = .offline(.unauthorized); show("Token rejected", isError: true); return false
         case .refused(let why), .unreachable(let why): show(why, isError: true); return false
         }
     }
@@ -156,6 +158,15 @@ final class RelayStore: ObservableObject {
                 // One refusal must not stop the rest: a single item being written
                 // into by a transfer should not block the other nineteen.
                 out.failures.append(why)
+            case .unauthorized:
+                // The token is wrong, so every remaining call is wrong the same way.
+                // Stop, and put the app offline rather than reporting N refusals that
+                // all mean "check Settings".
+                status = .offline(.unauthorized)
+                out.failures.append("Token rejected")
+                out.aborted = true
+                show("Token rejected", isError: true)
+                return out
             case .unreachable(let why):
                 // The relay is gone. Every remaining call would burn its own timeout,
                 // so stop rather than making the user wait 8s x N to be told the same
