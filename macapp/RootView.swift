@@ -481,7 +481,7 @@ private struct TopBar: View {
                         .accessibilityLabel("Shuttle")
                 }
                 Text("Shuttle")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Color.primary.opacity(0.85))
                     .fixedSize()
                 Spacer()
