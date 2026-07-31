@@ -154,12 +154,26 @@ struct FileTable: View {
                 // which is FileZilla's behaviour too.
                 rowMenu(for: resolve(paths))
             } primaryAction: { paths in
-                // FileZilla's own "Dir doubleclick action = Enter directory".
-                guard paths.count == 1, let p = paths.first else { return }
-                if p == parentEntry?.path, browse.canGoUp {
+                // FileZilla's two double-click actions, both of them:
+                // "Dir doubleclick action = Enter directory" and
+                // "File doubleclick action = add to queue".
+                if paths.count == 1, let p = paths.first,
+                   p == parentEntry?.path, browse.canGoUp {
                     Task { await browse.goUp() }
-                } else if let e = resolve(paths).first, e.isDir {
+                    return
+                }
+                let items = resolve(paths)
+                if items.count == 1, let e = items.first, e.isDir {
                     Task { await browse.open(e) }
+                    return
+                }
+                // Files queue. Source side only: the destination pane's contents
+                // are already home and there is nowhere to send them. A mixed
+                // selection queues the files and leaves the folders — opening one
+                // of several would not be a meaningful answer either.
+                let files = items.filter { !$0.isDir }
+                if !files.isEmpty, browse.mode == .seedbox {
+                    onAddToQueue(files)
                 }
             }
             .onAppear(perform: loadCustomization)
