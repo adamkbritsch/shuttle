@@ -128,14 +128,40 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .shuttleUp)) { _ in
             Task { await seedbox.goUp() }
         }
+        // A selection that is only ever SET goes stale the moment the job it points
+        // at finishes: the row stays highlighted in the Successful tab, implying it
+        // is still actionable, and the shortcut reports "select a transfer first"
+        // when one plainly is selected. Drop it as soon as it leaves the active list.
+        //
+        // The single-transfer case is auto-selected because there is nothing to
+        // disambiguate -- requiring a click there would make the shortcut less
+        // useful than the broken version it replaced.
+        .onChange(of: store.active) { _, now in
+            if let id = selectedTransfer, !now.contains(where: { $0.id == id }) {
+                selectedTransfer = nil
+            }
+            if selectedTransfer == nil, now.count == 1 {
+                selectedTransfer = now[0].id
+            }
+        }
+        // Selection is scoped to the queue: highlighting a row in Failed or
+        // Successful would suggest the shortcut applies there, and it does not.
+        .onChange(of: tab) { _, _ in selectedTransfer = nil }
         .onReceive(NotificationCenter.default.publisher(for: .shuttleCancel)) { _ in
             // Cancel what is SELECTED. This used to cancel store.active.first, so
             // with several transfers queued the shortcut stopped whichever happened
             // to sort first -- a destructive action on an item the user never
             // pointed at. With nothing selected it now does nothing and says so.
-            guard let id = selectedTransfer,
-                  store.active.contains(where: { $0.id == id }) else {
-                store.show("Select a transfer first, then press ⌘⌫", isError: false)
+            guard let id = selectedTransfer else {
+                store.show(store.active.isEmpty
+                           ? "Nothing is transferring"
+                           : "Select a transfer first, then press ⌘⌫", isError: false)
+                return
+            }
+            guard store.active.contains(where: { $0.id == id }) else {
+                // Selected, but already finished -- "select one first" would be
+                // flatly wrong here.
+                store.show("That transfer has already finished", isError: false)
                 return
             }
             Task { await store.cancel(id) }

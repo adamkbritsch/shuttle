@@ -39,7 +39,7 @@ struct TransfersPane: View {
                onCancel: { Task { await store.cancel(job.id) } },
                onDismiss: { Task { await store.dismiss(job.id) } },
                onRetry: { Task { _ = await store.retry(job.id) } },
-               isSelected: selected == job.id,
+               isSelected: tab == .queued && selected == job.id,
                onSelect: { selected = job.id },
                onLog: { openLog(job) },
                onVerify: { openVerify(job) })
