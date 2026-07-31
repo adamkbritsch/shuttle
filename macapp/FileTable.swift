@@ -56,6 +56,7 @@ struct FileTable: View {
     var onDelete: ([Entry]) -> Void = { _ in }
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
+    var onBulkRename: ([Entry]) -> Void = { _ in }
 
     @State private var sortOrder = [KeyPathComparator(\Entry.name)]
     @State private var customization = TableColumnCustomization<Entry>()
@@ -152,8 +153,10 @@ struct FileTable: View {
             }
             .contextMenu(forSelectionType: String.self) { paths in
                 // Right-clicking a row outside the selection passes just that row,
-                // which is FileZilla's behaviour too.
-                rowMenu(for: resolve(paths))
+                // which is FileZilla's behaviour too. Bulk rename needs the SAME set
+                // in drawing order, so it is resolved separately rather than
+                // reordering everything else.
+                rowMenu(for: resolve(paths), ordered: resolveOrdered(paths))
             } primaryAction: { paths in
                 // FileZilla's two double-click actions, both of them:
                 // "Dir doubleclick action = Enter directory" and
@@ -190,6 +193,17 @@ struct FileTable: View {
         browse.visibleEntries.filter { paths.contains($0.path) }
     }
 
+    /// The selection in the order the table is currently DRAWING it, which is what
+    /// sequential numbering has to follow — number by `resolve`'s order and the items
+    /// come out numbered by the relay's listing order, not the one on screen.
+    ///
+    /// Deliberately additive: `resolve` keeps its own order because Send's
+    /// predictability is defined against it. The `!isParent` filter is not optional —
+    /// `rows` carries the synthesised ".." entry, which must never reach a rename.
+    private func resolveOrdered(_ paths: Set<String>) -> [Entry] {
+        rows.filter { !isParent($0) && paths.contains($0.path) }
+    }
+
     private var emptyState: some View {
         VStack(spacing: 7) {
             Image(systemName: "folder")
@@ -222,7 +236,7 @@ struct FileTable: View {
     }
 
     @ViewBuilder
-    private func rowMenu(for items: [Entry]) -> some View {
+    private func rowMenu(for items: [Entry], ordered: [Entry] = []) -> some View {
         if items.isEmpty {
             backgroundMenu
         } else {
@@ -247,12 +261,15 @@ struct FileTable: View {
             }
             // The seedbox mount is read-only so nothing there can be renamed; the
             // menu simply does not offer it rather than offering a guaranteed error.
-            // Gated separately, because they need different things: renaming wants
-            // exactly one item (eight files cannot share a name), New Folder wants
-            // no selection at all, and deleting is happy with any number.
+            // Gated separately, because they need different things: one item gets
+            // the plain rename sheet while several get the bulk one (which derives a
+            // distinct name per item), New Folder wants no selection at all, and
+            // deleting is happy with any number.
             if browse.mode == .destinations {
                 if items.count == 1, let e = items.first {
                     Button("Rename…") { onRename(e) }
+                } else if items.count > 1 {
+                    Button("Rename \(items.count) Items…") { onBulkRename(ordered) }
                 }
                 Button("New Folder…") { onNewFolder() }
                 Divider()

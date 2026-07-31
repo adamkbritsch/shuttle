@@ -125,6 +125,66 @@ final class RelayStore: ObservableObject {
         }
     }
 
+    /// What a bulk rename actually did. `renamed` decides whether the caller reloads:
+    /// a deferred rename has changed nothing on disk yet.
+    struct BulkRenameOutcome {
+        var renamed = 0
+        var deferred = 0
+        var failures: [String] = []
+        var aborted = false
+    }
+
+    /// Runs a batch of renames in the order the plan gives them, and emits exactly
+    /// ONE toast for the lot.
+    ///
+    /// Calls `api.rename` directly rather than `rename(path:newName:)` above, which
+    /// toasts per call — twenty renames would fire twenty toasts, each replacing the
+    /// last, so the only one you would ever read is whichever finished last.
+    ///
+    /// Sequential, and that is required rather than merely tidy: `plan.steps` is
+    /// ordered so a name is freed before the next step wants it, which concurrency
+    /// would destroy.
+    func renameMany(_ steps: [BulkRenameStep]) async -> BulkRenameOutcome {
+        var out = BulkRenameOutcome()
+        for step in steps {
+            switch await api.rename(path: step.path, newName: step.newName) {
+            case .renamed:
+                out.renamed += 1
+            case .deferred:
+                out.deferred += 1
+            case .refused(let why):
+                // One refusal must not stop the rest: a single item being written
+                // into by a transfer should not block the other nineteen.
+                out.failures.append(why)
+            case .unreachable(let why):
+                // The relay is gone. Every remaining call would burn its own timeout,
+                // so stop rather than making the user wait 8s x N to be told the same
+                // thing repeatedly.
+                out.failures.append(why)
+                out.aborted = true
+                show(why, isError: true)
+                return out
+            }
+        }
+
+        let total = steps.count
+        if out.failures.isEmpty {
+            if out.deferred > 0 {
+                let unit = out.deferred == 1 ? "transfer finishes" : "transfers finish"
+                show(out.renamed > 0
+                     ? "Renamed \(out.renamed) — \(out.deferred) will be renamed when their \(unit)"
+                     : "\(out.deferred) will be renamed when their \(unit)", isError: false)
+            } else {
+                show("Renamed \(out.renamed) item\(out.renamed == 1 ? "" : "s")", isError: false)
+            }
+        } else {
+            // The first failure verbatim, not a list: the toast is capped at two
+            // lines, and the pane itself reports the rest (see below).
+            show("Renamed \(out.renamed) of \(total) — \(out.failures[0])", isError: true)
+        }
+        return out
+    }
+
     func startPolling() {
         guard timer == nil else { return }
         let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in

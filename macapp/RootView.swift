@@ -19,6 +19,7 @@ struct RootView: View {
     @State private var conflictPolicy: ConflictAction?
     @State private var deleting: PendingDelete?
     @State private var deleteStat: StatResult?
+    @State private var bulkRenaming: PendingBulkRename?
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -81,6 +82,31 @@ struct RootView: View {
                                 }
                             }
                         })
+        }
+        .sheet(item: $bulkRenaming) { pending in
+            BulkRenameSheet(items: pending.items,
+                            existingNames: pending.existingNames,
+                            listingTruncated: pending.truncated,
+                            onCancel: { bulkRenaming = nil },
+                            onApply: { plan in
+                                let steps = plan.steps
+                                let parent = pending.items.first.map {
+                                    ($0.path as NSString).deletingLastPathComponent
+                                }
+                                bulkRenaming = nil
+                                Task {
+                                    let out = await store.renameMany(steps)
+                                    // Deferred renames have changed nothing on disk,
+                                    // so reloading would just redraw the old names.
+                                    guard out.renamed > 0 else { return }
+                                    await dest.reload()
+                                    if let parent { destTree.refresh(parent) }
+                                    // No failure report is needed: reload() prunes the
+                                    // selection to entries that still exist, so it
+                                    // collapses to exactly the rows that did NOT get
+                                    // renamed — still selected, ready to try again.
+                                }
+                            })
         }
         .sheet(isPresented: Binding(get: { newFolderParent != nil },
                                     set: { if !$0 { newFolderParent = nil } })) {
@@ -329,7 +355,8 @@ struct RootView: View {
                                onRename: { beginRename($0) },
                                onDelete: { beginDelete($0) },
                                onNewFolder: { beginNewFolder(dest.path) },
-                               onQueueRenamed: { e, name in enqueue([e], as: name) })
+                               onQueueRenamed: { e, name in enqueue([e], as: name) },
+                               onBulkRename: { beginBulkRename($0) })
                     footer()
                 }
             },
@@ -448,6 +475,19 @@ struct RootView: View {
                                     isDir: items.count > 1 ? true : items[0].isDir,
                                     files: files, bytes: bytes)
         }
+    }
+
+    /// Synchronous, unlike beginDelete: everything the sheet needs is already in the
+    /// listing we are looking at.
+    ///
+    /// `dest.entries` and not `visibleEntries` — a row hidden by the pane's filter
+    /// still occupies its name on disk, so filtering here would miss real clashes.
+    private func beginBulkRename(_ items: [Entry]) {
+        guard items.count > 1 else { return }
+        bulkRenaming = PendingBulkRename(
+            items: items,
+            existingNames: Set(dest.entries.map(\.name)),
+            truncated: dest.truncatedTotal != nil)
     }
 
     private func beginNewFolder(_ parent: String) {
@@ -876,5 +916,15 @@ struct PendingConflict: Identifiable {
 /// One pending delete: the whole selection, so the sheet can total it.
 struct PendingDelete: Identifiable {
     let items: [Entry]
+    var id: String { items.map(\.path).joined(separator: "\u{0000}") }
+}
+
+
+/// One pending bulk rename: the selection in pane order, plus the snapshot of names
+/// already in that folder that the preview checks against.
+struct PendingBulkRename: Identifiable {
+    let items: [Entry]
+    let existingNames: Set<String>
+    let truncated: Bool
     var id: String { items.map(\.path).joined(separator: "\u{0000}") }
 }

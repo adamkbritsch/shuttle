@@ -287,3 +287,214 @@ struct NewFolderSheet: View {
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
     private func submit() { if !trimmed.isEmpty { onConfirm(trimmed) } }
 }
+
+/// Bulk rename: pick an operation, watch the preview, apply.
+///
+/// The preview is the feature. Every selected item shows old → new live as the
+/// fields change, and anything that would fail is flagged before a single request
+/// goes out — because the relay validates one rename at a time and genuinely cannot
+/// know that two of them collide with each other.
+///
+/// Apply stays disabled while any row is flagged. That is the user's chosen policy:
+/// nothing runs half-done.
+struct BulkRenameSheet: View {
+    let items: [Entry]
+    /// Every name currently in this directory, from the UNFILTERED listing — a row
+    /// hidden by the pane's filter still occupies its name on disk.
+    let existingNames: Set<String>
+    /// The listing was capped, so `existingNames` is incomplete and the "already
+    /// taken" check cannot be trusted to be exhaustive.
+    let listingTruncated: Bool
+    let onCancel: () -> Void
+    let onApply: (BulkRenamePlan) -> Void
+
+    @State private var spec = BulkRenameSpec()
+
+    private var plan: BulkRenamePlan {
+        BulkRenamePlan.make(items: items, spec: spec, existingNames: existingNames)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider().overlay(Theme.hairline)
+            operations
+            Divider().overlay(Theme.hairline)
+            preview
+            Divider().overlay(Theme.hairline)
+            footer
+        }
+        .frame(width: 620)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Rename \(items.count) items")
+                .font(.system(size: 15, weight: .semibold))
+            Text(items.first.map { ($0.path as NSString).deletingLastPathComponent } ?? "")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.head)
+        }
+        .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 13)
+    }
+
+    // MARK: - Operation picker
+
+    private var operations: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(BulkRenameOp.allCases) { op in
+                Button { spec.op = op } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: spec.op == op ? "largecircle.fill.circle" : "circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(spec.op == op ? Theme.accent : Color.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(op.label).font(.system(size: 12))
+                            Text(op.detail).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            fields.padding(.leading, 20).padding(.top, 3)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 13)
+    }
+
+    @ViewBuilder
+    private var fields: some View {
+        switch spec.op {
+        case .findReplace:
+            HStack(spacing: 8) {
+                labelled("Find", TextField("", text: $spec.find))
+                labelled("Replace with", TextField("", text: $spec.replace))
+            }
+            Toggle("Ignore case", isOn: $spec.ignoreCase)
+                .font(.system(size: 11)).toggleStyle(.checkbox).padding(.top, 4)
+
+        case .affix:
+            HStack(spacing: 8) {
+                labelled("Prefix", TextField("", text: $spec.prefix))
+                labelled("Suffix", TextField("", text: $spec.suffix))
+            }
+            Text("The suffix goes before the extension, so the file still opens.")
+                .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.top, 3)
+
+        case .number:
+            HStack(spacing: 8) {
+                labelled("Pattern", TextField("", text: $spec.pattern))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Start").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Stepper(value: $spec.start, in: 0...9999) {
+                        Text("\(spec.start)").font(.system(size: 11, design: .monospaced))
+                    }.fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Digits").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Stepper(value: $spec.pad, in: 0...6) {
+                        Text("\(spec.pad)").font(.system(size: 11, design: .monospaced))
+                    }.fixedSize()
+                }
+            }
+            Text(spec.pattern.contains("{n}")
+                 ? "Numbered in the order shown in the list."
+                 : "The pattern must contain {n}.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(spec.pattern.contains("{n}")
+                                 ? Color.secondary : Color(nsColor: .systemOrange))
+                .padding(.top, 3)
+        }
+    }
+
+    private func labelled(_ title: String, _ field: TextField<Text>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+            field
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11.5, design: .monospaced))
+        }
+    }
+
+    // MARK: - Preview
+
+    private var preview: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(plan.rows) { row in
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(row.entry.name)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                            Text(row.changed ? row.newName : "unchanged")
+                                .foregroundStyle(colour(for: row))
+                                .lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 0)
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        if let reason = row.reason {
+                            Text(reason)
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(nsColor: .systemRed))
+                                .lineLimit(2)
+                        }
+                    }
+                    .padding(.horizontal, 18).padding(.vertical, 4)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(height: 236)
+        .background(Theme.listFill)
+    }
+
+    private func colour(for row: BulkRenameRow) -> Color {
+        if row.issue != nil { return Color(nsColor: .systemRed) }
+        return row.changed ? Color.primary : Color.secondary.opacity(0.6)
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if listingTruncated {
+                Text("This folder has more items than Shuttle listed, so a clash with "
+                     + "something further down cannot be checked here.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Color(nsColor: .systemOrange))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 10) {
+                Text(status)
+                    .font(.system(size: 11))
+                    .foregroundStyle(plan.blocked ? Color(nsColor: .systemRed) : .secondary)
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Apply") { onApply(plan) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(!plan.canApply)
+            }
+        }
+        .padding(.horizontal, 18).padding(.vertical, 14)
+    }
+
+    private var status: String {
+        let flagged = plan.rows.filter { $0.issue != nil }.count
+        if flagged > 0 {
+            return flagged == 1 ? "1 name collides" : "\(flagged) names collide"
+        }
+        if plan.changedCount == 0 { return "Nothing would change" }
+        return "\(plan.changedCount) of \(items.count) will change"
+    }
+}
