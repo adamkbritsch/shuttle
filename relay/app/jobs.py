@@ -239,11 +239,18 @@ class Jobs:
                 raise JobError("source does not exist")
             is_dir = info["is_dir"]
             size = info["size"]
-            if is_dir and not size:
+            # `size <= 0`, not `not size`: rclone's lsjson reports a DIRECTORY's
+            # size as -1, which is truthy, so the walk below was skipped and -1 was
+            # stored as the job's byte total. That is why a queued directory could
+            # read "0.0 of -0.0 GB" at a negative percentage, and it also denies the
+            # progress calculation the one figure that does not grow mid-copy.
+            if is_dir and size <= 0:
                 try:
                     size = sum(f["size"] for f in seedbox.walk_files(rel_src))
                 except seedbox.SeedboxError:
                     size = 0
+            # Never let a sentinel reach the database.
+            size = max(0, size)
         else:
             if not os.path.exists(src_real):
                 raise JobError("source does not exist")
@@ -567,7 +574,10 @@ class Jobs:
         self.log(f"job {jid} start: {shlex.join(cmd)}")
 
         logpath = os.path.join(LOG_DIR, f"{jid}.log")
-        peak_pct = 0.0
+        # The size measured at enqueue, which walked the WHOLE source. Captured
+        # before the loop because the stats updates below overwrite the column.
+        planned_total = job["bytes_total"] or 0
+        peak_done = 0
         with open(logpath, "w") as logf:
             logf.write(shlex.join(cmd) + "\n")
             logf.flush()
@@ -610,14 +620,27 @@ class Jobs:
                     total = t.get("size") or total
                     speed = t.get("speedAvg") or t.get("speed") or speed
                     eta = t.get("eta") or eta
-                # totalBytes grows while rclone walks a tree, so clamp the
-                # displayed percentage monotonic to stop it jumping backwards.
-                if total:
-                    pct = 100.0 * done / total
-                    if pct < peak_pct:
-                        done = int(peak_pct * total / 100.0)
-                    else:
-                        peak_pct = pct
+                # rclone's totalBytes counts only what it has WALKED so far, so
+                # early in a directory copy it equals what has already been
+                # transferred. The previous fix clamped the PERCENTAGE monotonic,
+                # which it achieved by writing bytes_done back as
+                # `peak_pct * total` -- inventing a number rclone never reported.
+                # The moment those two figures momentarily agreed, peak_pct stuck
+                # at 100 and every later sample was rewritten to the full total, so
+                # a 20-file release sat at "100.0% - 117.6G of 117.6G" while
+                # reporting "file 14 of 20" and an ETA of 512s.
+                #
+                # Prefer the enqueue-time size: it walked the entire source and
+                # does not grow, so the percentage cannot reach 100 early and needs
+                # no clamp. max() covers a planned figure that turned out short,
+                # and the fallback covers a source that could not be walked.
+                if planned_total:
+                    total = max(planned_total, total)
+                # Clamp the REPORTED byte count instead, so a retry that restarts a
+                # file cannot walk the bar backwards. Never exceeds something rclone
+                # actually said.
+                done = max(done, peak_done)
+                peak_done = done
                 self._update(jid, bytes_done=done, bytes_total=total,
                              speed=speed, eta=int(eta),
                              files_done=files_done, files_total=files_total)
