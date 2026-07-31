@@ -105,11 +105,14 @@ struct FileTable: View {
     }
 
     private var rows: [Entry] {
-        let sorted = browse.visibleEntries.sorted(using: sortOrder)
-            .sorted { a, b in
-                if a.isDir != b.isDir { return a.isDir }
-                return false      // stable: keeps sorted(using:) order within a group
-            }
+        let ordered = browse.visibleEntries.sorted(using: sortOrder)
+        // Partitioned, not sorted a second time. The old second `sorted` returned
+        // false for same-kind pairs and relied on that preserving the first sort's
+        // order — but Swift's sort is introsort and is NOT documented as stable, so
+        // that only held because small arrays fall back to insertion sort. `filter`
+        // does guarantee order, and it is O(n) rather than another O(n log n) pass
+        // over a comparator that is now considerably more expensive.
+        let sorted = ordered.filter(\.isDir) + ordered.filter { !$0.isDir }
         return (parentEntry.map { [$0] } ?? []) + sorted
     }
 
