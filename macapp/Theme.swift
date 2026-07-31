@@ -133,6 +133,13 @@ enum Theme {
         return img
     }()
 
+    /// What the top bar paints instead of a live-blur material.
+    ///
+    /// Not guessed: the dark value is what `.headerView` actually resolved to over
+    /// this window, sampled from a screenshot of the previous build. The bar is
+    /// therefore the same colour it always was, minus the per-frame blend.
+    static let barFill = dynamic(dark: hex(0x1F1F20), light: hex(0xECECEC))
+
     static let splitKeys = ["main.rows", "main.browse", "source.split", "dest.split"]
 }
 
@@ -151,8 +158,13 @@ enum StatusTint {
     }
 }
 
-/// Native blurred material, so the bar looks right in light and dark without
-/// hardcoding either.
+/// Native blurred material.
+///
+/// Still here for anything that genuinely sits over changing content, but the top
+/// bar no longer uses it: NSVisualEffectView blends live, every frame the window
+/// composites, and the bar sits on an opaque window background where there is
+/// nothing behind it to show through. That is continuous GPU work for a result
+/// indistinguishable from a flat fill.
 struct VisualEffectView: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .headerView
 

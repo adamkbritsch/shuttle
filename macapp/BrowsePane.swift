@@ -52,7 +52,7 @@ struct BrowsePane: View {
                         .foregroundStyle(Color(nsColor: .systemOrange))
                         .padding(.horizontal, 10).padding(.vertical, 4)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.thinMaterial)
+                        .background(Theme.cardFill)
                 }
                 if browse.loading && browse.entries.isEmpty {
                     ProgressView().controlSize(.small)

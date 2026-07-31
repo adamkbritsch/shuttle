@@ -463,7 +463,7 @@ private struct TopBar: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            VisualEffectView()
+            Theme.barFill
             WindowDragArea()
             HStack(spacing: 10) {
                 Color.clear.frame(width: Theme.trafficLightGutter, height: 1)
