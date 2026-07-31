@@ -143,19 +143,12 @@ The relay writes into media volumes, so the guard rails are load-bearing:
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). **The artwork is not MIT**: the icon and wordmark
-derive from Adobe Stock imagery and are covered by that licence instead. Fork
-freely, but bring your own mark.
+MIT — see [LICENSE](LICENSE).
 
-Not affiliated with FileZilla, rclone, AList, Adobe, or any hosting provider.
+Not affiliated with FileZilla, rclone, AList, or any hosting provider.
 
 ---
 
 <p align="center">
   <img src="docs/assets/app-icon.png" alt="The Shuttle app icon" width="96">
-</p>
-
-<p align="center">
-  <sub>App icon and wordmark derived from artwork licensed through <a href="https://stock.adobe.com/">Adobe Stock</a>.<br>
-  Not covered by the MIT licence — see <a href="LICENSE">LICENSE</a>.</sub>
 </p>
