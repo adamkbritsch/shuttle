@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/shuttle-lockup.png" alt="Shuttle" width="420">
+  <img src="docs/assets/shuttle-lockup-v2.png" alt="Shuttle" width="420">
 </p>
 
 A pared-back, FileZilla-shaped client for moving files from a remote server onto a
