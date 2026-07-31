@@ -21,6 +21,8 @@ struct RootView: View {
     @State private var deleteStat: StatResult?
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
+    /// Which transfer ⌘⌫ cancels.
+    @State private var selectedTransfer: Int?
 
     init() {
         let s = RelayStore()
@@ -127,7 +129,16 @@ struct RootView: View {
             Task { await seedbox.goUp() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .shuttleCancel)) { _ in
-            if let j = store.active.first { Task { await store.cancel(j.id) } }
+            // Cancel what is SELECTED. This used to cancel store.active.first, so
+            // with several transfers queued the shortcut stopped whichever happened
+            // to sort first -- a destructive action on an item the user never
+            // pointed at. With nothing selected it now does nothing and says so.
+            guard let id = selectedTransfer,
+                  store.active.contains(where: { $0.id == id }) else {
+                store.show("Select a transfer first, then press ⌘⌫", isError: false)
+                return
+            }
+            Task { await store.cancel(id) }
         }
         // Pane toggles go through isCollapsed, never by rebuilding the hierarchy.
         .onReceive(NotificationCenter.default.publisher(for: .shuttleToggleSourceTree)) { _ in
@@ -250,7 +261,7 @@ struct RootView: View {
                                      canCollapse: true,
                                      holdingPriority: Theme.Hold.holdsFirmly,
                                      seed: Theme.queueSeed)) {
-                TransfersPane(store: store, tab: $tab)
+                TransfersPane(store: store, tab: $tab, selected: $selectedTransfer)
             },
         ])
     }

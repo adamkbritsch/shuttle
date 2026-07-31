@@ -32,6 +32,8 @@ final class RelayStore: ObservableObject {
     private var timer: Timer?
     private var nextPollAt = Date.distantPast
     private var toastClear: DispatchWorkItem?
+    private var polling = false
+    private var pollAgain = false
 
     /// Finished transfers are shown only for the CURRENT app session.
     ///
@@ -148,7 +150,26 @@ final class RelayStore: ObservableObject {
         nextPollAt = Date().addingTimeInterval(delay)
     }
 
+    /// Serialised. The 1s timer can fire again while a slow poll is still in the
+    /// air, and two in flight at once race to publish `active`/`recent` — the older
+    /// answer can land second and briefly resurrect a transfer that just finished.
+    /// A forced poll arriving mid-flight is remembered rather than dropped, because
+    /// its whole purpose is to reflect a change the user just made.
     func poll(force: Bool = false) async {
+        if polling {
+            if force { pollAgain = true }
+            return
+        }
+        polling = true
+        await performPoll(force: force)
+        polling = false
+        if pollAgain {
+            pollAgain = false
+            await poll(force: true)
+        }
+    }
+
+    private func performPoll(force: Bool) async {
         if force { await api.clearETag() }
         switch await api.jobs() {
         case .unchanged:
@@ -268,6 +289,8 @@ final class BrowseStore: ObservableObject {
     /// capped at 20 — FileZilla's CViewHeader keeps exactly 20.
     @Published private(set) var recentDirs: [String] = []
     @Published private(set) var truncatedTotal: Int?
+    /// Path of the last listing that actually succeeded.
+    private var loadedPath: String?
 
     let mode: Mode
     private let api: RelayAPI
@@ -322,16 +345,30 @@ final class BrowseStore: ObservableObject {
         defer { loading = false }
         // 5000 is api.py's own BROWSE_LIMIT_MAX. Asking for it keeps the status
         // line's file/directory breakdown honest past the default 1000.
+        // A refresh that fails must not replace a perfectly good listing with
+        // nothing. Losing the relay for one poll used to blank the pane, and the
+        // recovery was to navigate away and back. Only a listing for a DIFFERENT
+        // directory clears the rows, because then what is on screen really is wrong.
+        func fail(_ why: String) {
+            error = why
+            if loadedPath != path {
+                entries = []
+                truncatedTotal = nil
+            }
+        }
+
         switch await api.browse(path, limit: 5000) {
         case .listing(let l):
             entries = l.entries
             truncatedTotal = l.truncated ? l.total : nil
-        case .refused(let why): entries = []; error = why; truncatedTotal = nil
-        case .unauthorized: entries = []; error = "Token rejected"; truncatedTotal = nil
-        case .unreachable(let why): entries = []; error = why; truncatedTotal = nil
+            loadedPath = path
+        case .refused(let why): fail(why)
+        case .unauthorized: fail("Token rejected")
+        case .unreachable(let why): fail(why)
         }
         selection = selection.filter { p in entries.contains { $0.path == p } }
-        filter = ""                       // a filter from the last folder is noise here
+        // Only reset the filter when the rows actually changed underneath it.
+        if error == nil { filter = "" }
         noteRecent(path)
         if error == nil { UserDefaults.standard.set(path, forKey: pathKey) }
     }

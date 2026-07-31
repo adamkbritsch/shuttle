@@ -4,6 +4,9 @@ import SwiftUI
 struct TransfersPane: View {
     @ObservedObject var store: RelayStore
     @Binding var tab: Tab
+    /// The row ⌘⌫ acts on. Nil means nothing is selected and the shortcut
+    /// deliberately does nothing.
+    @Binding var selected: Int?
 
     /// FileZilla's three queue tabs, verbatim labels.
     enum Tab: String, CaseIterable, Identifiable {
@@ -27,6 +30,21 @@ struct TransfersPane: View {
         }
     }
 
+    /// Extracted from the ForEach body on purpose: with all seven closures inline
+    /// the expression exceeded the type-checker's budget and the build failed with
+    /// "unable to type-check this expression in reasonable time".
+    @ViewBuilder
+    private func row(_ job: Job) -> some View {
+        JobRow(job: job,
+               onCancel: { Task { await store.cancel(job.id) } },
+               onDismiss: { Task { await store.dismiss(job.id) } },
+               onRetry: { Task { _ = await store.retry(job.id) } },
+               isSelected: selected == job.id,
+               onSelect: { selected = job.id },
+               onLog: { openLog(job) },
+               onVerify: { openVerify(job) })
+    }
+
     private var rows: [Job] {
         switch tab {
         case .queued: return store.active
@@ -44,12 +62,7 @@ struct TransfersPane: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(rows) { job in
-                                JobRow(job: job,
-                                       onCancel: { Task { await store.cancel(job.id) } },
-                                       onDismiss: { Task { await store.dismiss(job.id) } },
-                                       onRetry: { Task { _ = await store.retry(job.id) } },
-                                       onLog: { openLog(job) },
-                                       onVerify: { openVerify(job) })
+                                row(job)
                                 Divider().overlay(Theme.hairline.opacity(0.6))
                             }
                         }
@@ -163,6 +176,8 @@ private struct JobRow: View {
     let onCancel: () -> Void
     let onDismiss: () -> Void
     var onRetry: () -> Void = { }
+    var isSelected: Bool = false
+    var onSelect: () -> Void = { }
     let onLog: () -> Void
     let onVerify: () -> Void
 
@@ -222,7 +237,9 @@ private struct JobRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .background(isSelected ? Theme.accentSoft : .clear)
         .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
         .contextMenu {
             if job.isActive {
                 Button("Stop Transfer", action: onCancel)
