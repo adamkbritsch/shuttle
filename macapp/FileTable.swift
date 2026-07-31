@@ -37,6 +37,32 @@ extension Entry {
     /// Sort keys. Directories carry -1 so they never interleave by size.
     var sortSize: Int64 { isDir ? -1 : (size ?? 0) }
     var sortDate: Double { mtime ?? 0 }
+    var sortName: NaturalName { NaturalName(name) }
+}
+
+/// A name that sorts the way Finder sorts, wrapped so it can still be reached
+/// through a KeyPathComparator and keep the table's comparator array homogeneous.
+///
+/// Swift's `<` on String compares Unicode scalars, which is wrong twice over for
+/// filenames. Measured on a real episode listing:
+///
+///   plain `<`      Episode 1 | Episode 10 | Episode 11 | Episode 2 | Episode 20 | Episode 3
+///   this           Episode 1 | Episode 2 | Episode 3 | Episode 10 | Episode 11 | Episode 20
+///
+/// It also folds case, so `ep01`, `EP02` and `Ep10` group together instead of every
+/// lowercase name being stranded after every uppercase one. `.numeric` alone fixes the
+/// digits but not the case; localizedStandardCompare is what Finder itself uses.
+struct NaturalName: Comparable {
+    let value: String
+    init(_ value: String) { self.value = value }
+
+    static func < (a: NaturalName, b: NaturalName) -> Bool {
+        a.value.localizedStandardCompare(b.value) == .orderedAscending
+    }
+
+    static func == (a: NaturalName, b: NaturalName) -> Bool {
+        a.value.localizedStandardCompare(b.value) == .orderedSame
+    }
 }
 
 // MARK: - The table
@@ -58,7 +84,7 @@ struct FileTable: View {
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
 
-    @State private var sortOrder = [KeyPathComparator(\Entry.name)]
+    @State private var sortOrder = [KeyPathComparator(\Entry.sortName)]
     @State private var customization = TableColumnCustomization<Entry>()
     @State private var loadedCustomization = false
 
@@ -92,7 +118,7 @@ struct FileTable: View {
         VStack(spacing: 0) {
             Table(rows, selection: $browse.selection,
                   sortOrder: $sortOrder, columnCustomization: $customization) {
-                TableColumn("Filename", sortUsing: KeyPathComparator(\Entry.name)) { e in
+                TableColumn("Filename", sortUsing: KeyPathComparator(\Entry.sortName)) { e in
                     HStack(spacing: 6) {
                         Image(systemName: isParent(e) ? "arrow.turn.left.up" : e.symbol)
                             .font(.system(size: 11.5))

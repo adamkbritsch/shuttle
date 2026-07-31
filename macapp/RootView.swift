@@ -70,12 +70,31 @@ struct RootView: View {
                             deleting = nil; deleteStat = nil
                             Task {
                                 var any = false
+                                var gone: [String] = []
                                 // Sequential, not concurrent: the relay refuses a
                                 // delete that overlaps a running transfer, and a
                                 // clear first refusal beats several racing ones.
-                                for p in paths where await store.delete(p) { any = true }
+                                for p in paths where await store.delete(p) {
+                                    any = true
+                                    gone.append(p)
+                                }
                                 if any {
-                                    await dest.reload()
+                                    // The tree can delete the directory the pane is
+                                    // VIEWING, or an ancestor of it; the file list can
+                                    // only ever delete a child, which is why this did
+                                    // not arise before. Reloading a path that no longer
+                                    // exists would leave the old rows on screen —
+                                    // reload deliberately KEEPS a good listing when a
+                                    // refresh fails — so the pane would show the
+                                    // contents of a folder that is gone. Move up to the
+                                    // nearest surviving parent instead.
+                                    if let dead = gone.first(where: {
+                                        dest.path == $0 || dest.path.hasPrefix($0 + "/")
+                                    }) {
+                                        await dest.go(to: (dead as NSString).deletingLastPathComponent)
+                                    } else {
+                                        await dest.reload()
+                                    }
                                     if let first = paths.first {
                                         destTree.refresh((first as NSString).deletingLastPathComponent)
                                     }
@@ -367,7 +386,9 @@ struct RootView: View {
         DirTreeView(tree: tree, browse: browse, root: root,
                     onAddToQueue: { enqueue([$0]) },
                     destinationName: destinationLabel,
-                    onRename: { beginRename($0) })
+                    onRename: { beginRename($0) },
+                    onDelete: { beginDelete([$0]) },
+                    onNewFolder: { beginNewFolder($0) })
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.listFill)
             )
@@ -405,13 +426,25 @@ struct RootView: View {
             return
         }
         let destPath = dest.path
+        // One action that adds MORE than one item queues them in name order, so
+        // Episode 2 transfers before Episode 10 whatever order the pane happened to
+        // hand them over in — the pane's own order is the relay's listing order, which
+        // is plain lexicographic and puts Episode 10 first.
+        //
+        // Deliberately scoped to a multi-item add. A single add has nothing to order,
+        // and two separate adds keep their own arrival order rather than the queue
+        // being silently re-sorted behind the user. Name order specifically, not
+        // whichever column the table happens to be sorted by.
+        let ordered = sources.count > 1
+            ? sources.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            : sources
         // A fresh Send starts asking again: "always use this action" is scoped to one
         // send, exactly like FileZilla's "Apply to current queue only".
         conflictPolicy = nil
         Task {
             // POST /v1/jobs takes one src per call, so N selected items are N calls,
             // each through the relay's own validate_request gate.
-            for src in sources {
+            for src in ordered {
                 // Nil policy means "ask": the relay scans the destination and answers
                 // 409 rather than silently overwriting.
                 let report = await store.send(src: src.path, destDir: destPath,
@@ -422,7 +455,7 @@ struct RootView: View {
                     // resumes them with whatever was chosen.
                     conflict = PendingConflict(
                         src: src.path, destDir: destPath, report: report,
-                        remaining: Array(sources.drop(while: { $0.path != src.path }).dropFirst()))
+                        remaining: Array(ordered.drop(while: { $0.path != src.path }).dropFirst()))
                     return
                 }
             }

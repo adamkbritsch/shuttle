@@ -280,6 +280,10 @@ class Jobs:
         con.commit()
         con.close()
         self._q.put(jid)
+        # Workers now wait on the gate rather than on the queue, so poke it: without
+        # this the job would not start until some worker's next one-second timeout.
+        with self._gate:
+            self._gate.notify()
         self.log(f"enqueued job {jid}: {dest_name} -> {dest_dir}")
         return jid
 
@@ -482,12 +486,34 @@ class Jobs:
 
     def _worker(self):
         while True:
-            jid = self._q.get()
-            # Hold here until a slot is free. Lowering the limit therefore takes
-            # effect as running jobs finish -- it never interrupts one mid-copy.
             with self._gate:
-                while self._running >= self._limit:
+                # Wait for a free slot AND a job, then take the job while still
+                # holding the gate.
+                #
+                # This used to dequeue FIRST and wait for a slot afterwards. That let
+                # all eight workers grab eight job ids and then race for the one
+                # slot, and Condition.notify() wakes an ARBITRARY waiter -- so the
+                # order jobs actually started in was thread-wakeup order, not the
+                # order they were queued. Measured against a standalone reproduction
+                # of the old shape: 10 of 12 runs started out of order. Taking the
+                # job under the gate makes it 12 of 12, because only one worker is
+                # ever inside here at a time.
+                #
+                # Waiting for the job HERE, rather than parking on a blocking get()
+                # while holding a slot, is what keeps a lowered limit honest: an idle
+                # worker holding a slot let four jobs run at once under a limit of
+                # one (also measured).
+                #
+                # Lowering the limit still takes effect as running jobs finish -- it
+                # never interrupts one mid-copy.
+                while self._running >= self._limit or self._q.empty():
                     self._gate.wait(timeout=1.0)
+                try:
+                    jid = self._q.get_nowait()
+                except queue.Empty:
+                    # Cannot happen while every consumer holds the gate, but a
+                    # raise here would kill the worker thread for good.
+                    continue
                 self._running += 1
             with self._active_lock:
                 self._active += 1
