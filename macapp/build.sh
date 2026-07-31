@@ -100,9 +100,14 @@ fi
 
 # The relay is plain HTTP on a private address, so it needs an ATS exception --
 # without one the load fails with -1022. Exceptions are per-HOST, so there is
-# nothing to write unless a host was actually supplied; the app is perfectly
-# usable with the address left to Settings, and shipping an empty <key></key>
-# would produce a malformed Info.plist.
+# nothing to write unless a host was actually supplied, and shipping an empty
+# <key></key> would produce a malformed Info.plist.
+#
+# NOTE: typing the address into Settings is NOT a substitute. ATS is keyed on the
+# host in Info.plist and is decided before any socket is opened, so a build with
+# no host bakes in a binary that cannot reach a plain-HTTP relay at ANY address --
+# it fails silently as "can't reach the relay", with no connection attempt to find
+# in lsof and nothing in the relay's log. An HTTPS relay is unaffected.
 RELAY_KEYS=""
 if [[ -n "$RELAY_HOST" ]]; then
   RELAY_KEYS="  <key>SHRelayBase</key><string>http://${RELAY_HOST}:8789</string>
@@ -119,7 +124,11 @@ if [[ -n "$RELAY_HOST" ]]; then
   </dict>"
   echo "==> Baking in relay host ${RELAY_HOST}"
 else
-  echo "==> No SHUTTLE_RELAY_HOST set; configure the address in Settings"
+  echo "==> WARNING: no SHUTTLE_RELAY_HOST set."
+  echo "    No ATS exception is baked in, so this build CANNOT reach a plain-HTTP"
+  echo "    relay -- setting the address in Settings will not help, and the app will"
+  echo "    just say it cannot reach the relay. Rebuild as:"
+  echo "        SHUTTLE_RELAY_HOST=<host> ./macapp/build.sh"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
