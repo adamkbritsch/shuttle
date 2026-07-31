@@ -13,7 +13,7 @@ struct BrowsePane: View {
     var onAddToQueue: ([Entry]) -> Void = { _ in }
     var destinationName: String = ""
     var onRename: (Entry) -> Void = { _ in }
-    var onDelete: (Entry) -> Void = { _ in }
+    var onDelete: ([Entry]) -> Void = { _ in }
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
 

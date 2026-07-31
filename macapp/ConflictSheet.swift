@@ -181,7 +181,9 @@ struct ConflictSheet: View {
 /// and check. Until that answer arrives the destructive button stays disabled, so a
 /// reflexive Return cannot fire before the stakes are on screen.
 struct DeleteSheet: View {
-    let entry: Entry
+    let items: [Entry]
+    /// Totals across every selected item, summed from the relay. Nil until it
+    /// answers.
     let stat: StatResult?
     let onCancel: () -> Void
     let onConfirm: () -> Void
@@ -193,14 +195,14 @@ struct DeleteSheet: View {
                     .font(.system(size: 24))
                     .foregroundStyle(Color(nsColor: .systemRed))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Delete \u{201C}\(entry.name)\u{201D}?")
+                    Text(title)
                         .font(.system(size: 15, weight: .semibold))
                         .lineLimit(2).truncationMode(.middle)
                     Text(detail)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text((entry.path as NSString).deletingLastPathComponent)
+                    Text((items.first.map { ($0.path as NSString).deletingLastPathComponent } ?? ""))
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1).truncationMode(.head)
@@ -227,10 +229,19 @@ struct DeleteSheet: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    private var title: String {
+        if items.count == 1, let e = items.first {
+            return "Delete \u{201C}\(e.name)\u{201D}?"
+        }
+        return "Delete \(items.count) items?"
+    }
+
     private var detail: String {
         guard let stat else { return "Checking what is there\u{2026}" }
-        if !stat.isDir { return humanBytes(stat.bytes) }
         let f = stat.files == 1 ? "1 file" : "\(stat.files) files"
+        // A single plain file needs no file count -- "1 file · 6.2G" reads oddly
+        // when the thing being deleted IS that file.
+        if items.count == 1, !stat.isDir { return humanBytes(stat.bytes) }
         return "\(f) \u{00B7} \(humanBytes(stat.bytes))"
     }
 }

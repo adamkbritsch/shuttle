@@ -53,7 +53,7 @@ struct FileTable: View {
     var destinationName: String = ""
     /// NAS side only: ask to rename this item.
     var onRename: (Entry) -> Void = { _ in }
-    var onDelete: (Entry) -> Void = { _ in }
+    var onDelete: ([Entry]) -> Void = { _ in }
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
 
@@ -247,11 +247,20 @@ struct FileTable: View {
             }
             // The seedbox mount is read-only so nothing there can be renamed; the
             // menu simply does not offer it rather than offering a guaranteed error.
-            if browse.mode == .destinations, items.count == 1, let e = items.first {
-                Button("Rename…") { onRename(e) }
+            // Gated separately, because they need different things: renaming wants
+            // exactly one item (eight files cannot share a name), New Folder wants
+            // no selection at all, and deleting is happy with any number.
+            if browse.mode == .destinations {
+                if items.count == 1, let e = items.first {
+                    Button("Rename…") { onRename(e) }
+                }
                 Button("New Folder…") { onNewFolder() }
                 Divider()
-                Button("Delete…", role: .destructive) { onDelete(e) }
+                Button(items.count == 1
+                       ? "Delete…"
+                       : "Delete \(items.count) Items…", role: .destructive) {
+                    onDelete(items)
+                }
             }
             if items.count == 1 { Divider() }
             Button(items.count == 1 ? "Copy Path" : "Copy \(items.count) Paths") {

@@ -17,7 +17,7 @@ struct RootView: View {
     @State private var conflict: PendingConflict?
     /// Set by "always use this action", so the rest of a multi-item send stops asking.
     @State private var conflictPolicy: ConflictAction?
-    @State private var deleting: Entry?
+    @State private var deleting: PendingDelete?
     @State private var deleteStat: StatResult?
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
@@ -61,16 +61,23 @@ struct RootView: View {
                               Task { await resolve(pending, action: action, newName: newName) }
                           })
         }
-        .sheet(item: $deleting) { entry in
-            DeleteSheet(entry: entry, stat: deleteStat,
+        .sheet(item: $deleting) { pending in
+            DeleteSheet(items: pending.items, stat: deleteStat,
                         onCancel: { deleting = nil; deleteStat = nil },
                         onConfirm: {
-                            let path = entry.path
+                            let paths = pending.items.map(\.path)
                             deleting = nil; deleteStat = nil
                             Task {
-                                if await store.delete(path) {
+                                var any = false
+                                // Sequential, not concurrent: the relay refuses a
+                                // delete that overlaps a running transfer, and a
+                                // clear first refusal beats several racing ones.
+                                for p in paths where await store.delete(p) { any = true }
+                                if any {
                                     await dest.reload()
-                                    destTree.refresh((path as NSString).deletingLastPathComponent)
+                                    if let first = paths.first {
+                                        destTree.refresh((first as NSString).deletingLastPathComponent)
+                                    }
                                 }
                             }
                         })
@@ -424,10 +431,23 @@ struct RootView: View {
 
     /// Asks the relay what is actually there before showing the sheet, so the
     /// confirmation can state the size and file count rather than just a name.
-    private func beginDelete(_ entry: Entry) {
+    /// For a multi-item delete the totals are summed across the selection — the
+    /// number that makes someone stop and check is the combined one.
+    private func beginDelete(_ items: [Entry]) {
+        guard !items.isEmpty else { return }
         deleteStat = nil
-        deleting = entry
-        Task { deleteStat = await store.statFor(entry.path) }
+        deleting = PendingDelete(items: items)
+        Task {
+            var files = 0, bytes: Int64 = 0
+            for e in items {
+                guard let s = await store.statFor(e.path) else { continue }
+                files += s.files
+                bytes += s.bytes
+            }
+            deleteStat = StatResult(path: items[0].path,
+                                    isDir: items.count > 1 ? true : items[0].isDir,
+                                    files: files, bytes: bytes)
+        }
     }
 
     private func beginNewFolder(_ parent: String) {
@@ -850,4 +870,11 @@ struct PendingConflict: Identifiable {
     let report: ConflictReport
     let remaining: [Entry]
     var id: String { src }
+}
+
+
+/// One pending delete: the whole selection, so the sheet can total it.
+struct PendingDelete: Identifiable {
+    let items: [Entry]
+    var id: String { items.map(\.path).joined(separator: "\u{0000}") }
 }
