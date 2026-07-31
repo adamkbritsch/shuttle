@@ -1,4 +1,6 @@
-<img src="docs/assets/shuttle-lockup-v3.png" alt="Shuttle" width="300">
+<p align="center">
+  <img src="docs/assets/shuttle-lockup-v3.png" alt="Shuttle" width="300">
+</p>
 
 A pared-back, FileZilla-shaped client for moving files from a remote server onto a
 NAS — where the part that actually does the copying lives somewhere other than the
