@@ -227,7 +227,27 @@ class Jobs:
     # ---------- queue ----------
 
     def enqueue(self, src_real: str, dest_dir: str, dest_name: str,
-                on_conflict: str = "overwrite") -> int:
+                on_conflict: str = "overwrite") -> tuple:
+        """Returns (job_id, created). `created` is False when this exact copy was
+        already queued or running, in which case the EXISTING job's id comes back
+        and nothing new is added.
+
+        Identity is (source, destination folder, destination name). Deliberately
+        not the source alone: the same release copied into two different volumes,
+        or copied twice under different names, is two real jobs.
+
+        Only 'queued' and 'running' count as already-present. A finished, failed or
+        cancelled job is not in the queue, and re-adding it is a legitimate way to
+        copy it again -- which is exactly what /retry does.
+        """
+        # Checked BEFORE the seedbox stat below, which costs ~13s on a cold
+        # connection: adding something twice should be cheap, not slower than
+        # adding it once.
+        existing = self._active_duplicate(src_real, dest_dir, dest_name)
+        if existing is not None:
+            self.log(f"already queued as job {existing}: {dest_name} -> {dest_dir}")
+            return existing, False
+
         rel_src = _src_rel(src_real)
         if rel_src is not None:
             # Ask the seedbox, not the filesystem: there may not be a mount at all.
@@ -276,23 +296,51 @@ class Jobs:
 
         now = time.time()
         con = _connect()
-        cur = con.execute(
-            "INSERT INTO jobs (src_real,src_remote,dest_dir,dest_name,is_dir,"
-            "bytes_total,dest_preexisted,on_conflict,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (src_real, self.to_remote(src_real), dest_dir, dest_name,
-             int(is_dir), size, dest_preexisted,
-             on_conflict if on_conflict in CONFLICT_FLAGS else "overwrite", now, now))
-        jid = cur.lastrowid
-        con.commit()
-        con.close()
+        try:
+            # The check at the top of this function ran BEFORE a stat that can take
+            # seconds, which is plenty of time for a second add of the same thing to
+            # get past it. BEGIN IMMEDIATE takes the write lock, so the re-check and
+            # the insert are one atomic step and two racing adds cannot both land.
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT id FROM jobs WHERE src_real=? AND dest_dir=? AND dest_name=? "
+                "AND state IN ('queued','running') ORDER BY id LIMIT 1",
+                (src_real, dest_dir, dest_name)).fetchone()
+            if row:
+                con.commit()
+                self.log(f"already queued as job {row['id']}: {dest_name} -> {dest_dir}")
+                return row["id"], False
+            cur = con.execute(
+                "INSERT INTO jobs (src_real,src_remote,dest_dir,dest_name,is_dir,"
+                "bytes_total,dest_preexisted,on_conflict,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (src_real, self.to_remote(src_real), dest_dir, dest_name,
+                 int(is_dir), size, dest_preexisted,
+                 on_conflict if on_conflict in CONFLICT_FLAGS else "overwrite", now, now))
+            jid = cur.lastrowid
+            con.commit()
+        finally:
+            con.close()
         self._q.put(jid)
         # Workers now wait on the gate rather than on the queue, so poke it: without
         # this the job would not start until some worker's next one-second timeout.
         with self._gate:
             self._gate.notify()
         self.log(f"enqueued job {jid}: {dest_name} -> {dest_dir}")
-        return jid
+        return jid, True
+
+    @staticmethod
+    def _active_duplicate(src_real: str, dest_dir: str, dest_name: str):
+        """The id of an identical job that is already queued or running, else None."""
+        con = _connect()
+        try:
+            row = con.execute(
+                "SELECT id FROM jobs WHERE src_real=? AND dest_dir=? AND dest_name=? "
+                "AND state IN ('queued','running') ORDER BY id LIMIT 1",
+                (src_real, dest_dir, dest_name)).fetchone()
+        finally:
+            con.close()
+        return row["id"] if row else None
 
     @staticmethod
     def _source_size(path: str, is_dir: bool) -> int:

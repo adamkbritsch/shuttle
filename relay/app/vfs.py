@@ -146,7 +146,7 @@ class RelayFS(AbstractedFS):
         from jobs import JobError
         try:
             src, dest_dir, dest_name = guards.validate_request(src, dest_dir, dest_name)
-            jid = self.jobs.enqueue(src, dest_dir, dest_name)
+            jid, _ = self.jobs.enqueue(src, dest_dir, dest_name)
         except JobError as exc:
             # guards and jobs both speak JobError; 550 is this front end's dialect.
             raise FilesystemError(str(exc))

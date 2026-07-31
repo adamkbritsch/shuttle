@@ -392,7 +392,13 @@ class Handler(BaseHTTPRequestHandler):
         elif policy == "rename":
             policy = "overwrite"
 
-        jid = self.jobs.enqueue(src, dest_dir, dest_name, on_conflict=policy)
+        jid, created = self.jobs.enqueue(src, dest_dir, dest_name, on_conflict=policy)
+        if not created:
+            # 200, not 201: nothing was created. The app says so rather than
+            # implying a second copy was queued.
+            self.log(f"api duplicate: {dest_name} -> {guards.to_virtual(dest_dir)} "
+                     f"is already job {jid}")
+            return self._send(200, {"id": jid, "duplicate": True})
         self.log(f"api enqueued job {jid}: {dest_name} -> {guards.to_virtual(dest_dir)} "
                  f"[on_conflict={policy}]")
         self._send(201, {"id": jid})
@@ -487,8 +493,10 @@ class Handler(BaseHTTPRequestHandler):
             raise JobError(f"job {jid} is still {row['state']}")
         src, dest_dir, dest_name = guards.validate_request(
             row["src_real"], row["dest_dir"], row["dest_name"])
-        new_id = self.jobs.enqueue(src, dest_dir, dest_name,
-                                   on_conflict=row["on_conflict"] or "overwrite")
+        # The guard above already refused a retry of a queued/running job, so a
+        # duplicate here means an identical job was queued by some other route.
+        new_id, _ = self.jobs.enqueue(src, dest_dir, dest_name,
+                                      on_conflict=row["on_conflict"] or "overwrite")
         self.log(f"retry of job {jid} queued as {new_id}")
         self._send(201, {"id": new_id, "retry_of": jid})
 

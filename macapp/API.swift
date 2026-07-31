@@ -218,6 +218,13 @@ actor RelayAPI {
                 return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
             }
             let name = destName ?? (src as NSString).lastPathComponent
+            // The relay refuses to queue the same copy twice and hands back the
+            // existing job instead, so say that rather than implying a second one
+            // started — the queue will show one row either way.
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if (obj?["duplicate"] as? Bool) == true {
+                return .ok("\(name) is already in the queue")
+            }
             return .ok("Copying \(name)")
         } catch { return .unreachable(RelayAPI.describe(error)) }
     }
