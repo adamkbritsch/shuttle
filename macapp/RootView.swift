@@ -441,10 +441,19 @@ private struct TopBar: View {
             WindowDragArea()
             HStack(spacing: 10) {
                 Color.clear.frame(width: Theme.trafficLightGutter, height: 1)
-                Text("Shuttle")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.primary.opacity(0.85))
-                    .fixedSize()
+                // The mark rather than the word: at this size the name adds nothing
+                // the window title and the Dock do not already say, and the chrome
+                // reads quieter without it. Tinted to the same weight as the buttons
+                // to its right so it blends into the bar instead of sitting on it.
+                if let mark = Theme.markTemplate {
+                    Image(nsImage: mark)
+                        .resizable()
+                        .renderingMode(.template)
+                        .interpolation(.high)
+                        .frame(width: 15, height: 15)
+                        .foregroundStyle(Color.primary.opacity(0.55))
+                        .accessibilityLabel("Shuttle")
+                }
                 Spacer()
                 statusPill
                 ChromeButton(symbol: "arrow.clockwise", help: "Refresh (⌘R)", action: onRefresh)

@@ -117,6 +117,18 @@ enum Theme {
         static let holdsFirmly = NSLayoutConstraint.Priority(260)
     }
 
+    /// The capsule from the app icon, flat and rotated, loaded as a TEMPLATE image.
+    /// Template means macOS discards its colour and paints it with whatever
+    /// foreground style the view sets, which is the whole point here: the mark has
+    /// to sit in the chrome at the same weight as the other controls rather than
+    /// arriving as a bright blue sticker.
+    static let markTemplate: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "MarkTemplate", withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        img.isTemplate = true
+        return img
+    }()
+
     static let splitKeys = ["main.rows", "main.browse", "source.split", "dest.split"]
 }
 

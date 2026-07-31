@@ -70,6 +70,7 @@ echo "==> Assembling bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TMP/$EXEC_NAME" "$APP/Contents/MacOS/$EXEC_NAME"
+cp "$SRC/MarkTemplate.png" "$APP/Contents/Resources/MarkTemplate.png"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # 2. Icon. Shuttle.icon is an Icon Composer bundle, which iconutil cannot read —
