@@ -34,9 +34,16 @@ ROOT_ALIAS = "downloads"
 
 # rclone's own backend names. "ftps" is not a backend: it is the ftp backend with
 # explicit_tls, which is what virtually every seedbox actually serves.
+# Every key is stated explicitly, including the false ones. Setting only the keys
+# that matter is not enough: if the host happens to have an rclone.conf with its own
+# [seedbox] section, rclone MERGES it with the environment, and any key the
+# environment does not name is taken from the file. A leftover `explicit_tls = true`
+# there makes a plain-FTP connection send AUTH and fail with
+# `500 Command "AUTH" not understood`, which looks like a broken server rather than
+# a config collision. Observed, not theoretical.
 PROTOCOLS = {
-    "ftp":  {"type": "ftp"},
-    "ftps": {"type": "ftp", "explicit_tls": "true"},
+    "ftp":  {"type": "ftp",  "explicit_tls": "false", "implicit_tls": "false"},
+    "ftps": {"type": "ftp",  "explicit_tls": "true",  "implicit_tls": "false"},
     "sftp": {"type": "sftp"},
 }
 DEFAULT_PORTS = {"ftp": 21, "ftps": 21, "sftp": 22}
@@ -132,6 +139,18 @@ def env(base=None) -> dict:
     c = load()
     if not c:
         return e
+    # Belt and braces alongside the explicit keys above: point rclone at an empty
+    # config so the remote is defined ENTIRELY by this environment and no stray
+    # rclone.conf can contribute anything.
+    empty = os.path.join(DATA_DIR, "rclone-empty.conf")
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if not os.path.exists(empty):
+            with open(empty, "w"):
+                pass
+        e["RCLONE_CONFIG"] = empty
+    except OSError:
+        pass
     spec = PROTOCOLS.get(c.get("protocol", "ftps"), PROTOCOLS["ftps"])
     up = REMOTE.upper()
     for k, v in spec.items():

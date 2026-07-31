@@ -34,9 +34,6 @@ services:
       # Safe verification target: writes nothing shared, so tests cannot fire
       # nas-watcher or litter the media library.
       - ./data/test:/srv/tree/queue/_scratch
-      # OPTIONAL. Only the FTP front end (for FileZilla) needs a seedbox mount;
-      # Shuttle talks to the seedbox directly over rclone. Delete this block if
-      # you only use Shuttle.
       - type: bind
         source: ${SEEDBOX_MOUNT:-/dev/null}
         target: /srv/tree/seedbox
