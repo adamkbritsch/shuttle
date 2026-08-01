@@ -20,6 +20,11 @@ struct RootView: View {
     @State private var deleting: PendingDelete?
     @State private var deleteStat: StatResult?
     @State private var bulkRenaming: PendingBulkRename?
+    /// The pane an open Rename/Delete sheet is acting on. Both now work on either
+    /// side, so reloading `dest` unconditionally would refresh the wrong list and
+    /// leave the seedbox still showing something that has just been removed.
+    @State private var actionPane: BrowseStore?
+    @State private var actionTree: TreeStore?
     /// Which side the user last acted on, so a global shortcut acts where they are
     /// looking. Selection and navigation are the only two ways to "be" in a pane.
     @State private var activePane: BrowseStore.Mode = .seedbox
@@ -91,15 +96,16 @@ struct RootView: View {
                                     // refresh fails — so the pane would show the
                                     // contents of a folder that is gone. Move up to the
                                     // nearest surviving parent instead.
+                                    let pane = actingPane, tree = actingTree
                                     if let dead = gone.first(where: {
-                                        dest.path == $0 || dest.path.hasPrefix($0 + "/")
+                                        pane.path == $0 || pane.path.hasPrefix($0 + "/")
                                     }) {
-                                        await dest.go(to: (dead as NSString).deletingLastPathComponent)
+                                        await pane.go(to: (dead as NSString).deletingLastPathComponent)
                                     } else {
-                                        await dest.reload()
+                                        await pane.reload()
                                     }
                                     if let first = paths.first {
-                                        destTree.refresh((first as NSString).deletingLastPathComponent)
+                                        tree.refresh((first as NSString).deletingLastPathComponent)
                                     }
                                 }
                             }
@@ -121,8 +127,8 @@ struct RootView: View {
                                     // Deferred renames have changed nothing on disk,
                                     // so reloading would just redraw the old names.
                                     guard out.renamed > 0 else { return }
-                                    await dest.reload()
-                                    if let parent { destTree.refresh(parent) }
+                                    await actingPane.reload()
+                                    if let parent { actingTree.refresh(parent) }
                                     // No failure report is needed: reload() prunes the
                                     // selection to entries that still exist, so it
                                     // collapses to exactly the rows that did NOT get
@@ -156,8 +162,8 @@ struct RootView: View {
                                 // A deferred rename changes nothing on disk yet, so
                                 // reloading would just redraw the old name.
                                 if didRename {
-                                    await dest.reload()
-                                    destTree.refresh((path as NSString).deletingLastPathComponent)
+                                    await actingPane.reload()
+                                    actingTree.refresh((path as NSString).deletingLastPathComponent)
                                 }
                             }
                         })
@@ -385,11 +391,11 @@ struct RootView: View {
                     BrowsePane(browse: browse, title: title,
                                onAddToQueue: { enqueue($0) },
                                destinationName: destinationLabel,
-                               onRename: { beginRename($0) },
-                               onDelete: { beginDelete($0) },
+                               onRename: { beginRename($0, in: browse, tree: tree) },
+                               onDelete: { beginDelete($0, in: browse, tree: tree) },
                                onNewFolder: { beginNewFolder(dest.path) },
                                onQueueRenamed: { e, name in enqueue([e], as: name) },
-                               onBulkRename: { beginBulkRename($0) })
+                               onBulkRename: { beginBulkRename($0, in: browse, tree: tree) })
                     footer()
                 }
             },
@@ -400,8 +406,8 @@ struct RootView: View {
         DirTreeView(tree: tree, browse: browse, root: root,
                     onAddToQueue: { enqueue([$0]) },
                     destinationName: destinationLabel,
-                    onRename: { beginRename($0) },
-                    onDelete: { beginDelete([$0]) },
+                    onRename: { beginRename($0, in: browse, tree: tree) },
+                    onDelete: { beginDelete([$0], in: browse, tree: tree) },
                     onNewFolder: { beginNewFolder($0) })
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.listFill)
@@ -417,6 +423,9 @@ struct RootView: View {
     private var canSend: Bool {
         !seedbox.selectedEntries.isEmpty && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
     }
+
+    private var actingPane: BrowseStore { actionPane ?? dest }
+    private var actingTree: TreeStore { actionTree ?? destTree }
 
     /// What ⌘⌫ acts on: whatever is selected, or the only active transfer when there
     /// is exactly one.
@@ -541,8 +550,9 @@ struct RootView: View {
     /// confirmation can state the size and file count rather than just a name.
     /// For a multi-item delete the totals are summed across the selection — the
     /// number that makes someone stop and check is the combined one.
-    private func beginDelete(_ items: [Entry]) {
+    private func beginDelete(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
         guard !items.isEmpty else { return }
+        actionPane = pane; actionTree = tree
         deleteStat = nil
         deleting = PendingDelete(items: items)
         Task {
@@ -563,12 +573,13 @@ struct RootView: View {
     ///
     /// `dest.entries` and not `visibleEntries` — a row hidden by the pane's filter
     /// still occupies its name on disk, so filtering here would miss real clashes.
-    private func beginBulkRename(_ items: [Entry]) {
+    private func beginBulkRename(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
         guard items.count > 1 else { return }
+        actionPane = pane; actionTree = tree
         bulkRenaming = PendingBulkRename(
             items: items,
-            existingNames: Set(dest.entries.map(\.name)),
-            truncated: dest.truncatedTotal != nil)
+            existingNames: Set(pane.entries.map(\.name)),
+            truncated: pane.truncatedTotal != nil)
     }
 
     private func beginNewFolder(_ parent: String) {
@@ -576,7 +587,8 @@ struct RootView: View {
         newFolderParent = parent
     }
 
-    private func beginRename(_ entry: Entry) {
+    private func beginRename(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
+        actionPane = pane; actionTree = tree
         renameDraft = entry.name
         renaming = entry
     }

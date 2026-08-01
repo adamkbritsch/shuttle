@@ -220,6 +220,44 @@ def stat(rel: str, timeout: int = 30):
             "size": int(item.get("Size") or 0)}
 
 
+def _run(cmd: list, timeout: int):
+    """One rclone invocation against the remote, with rclone's own last line as the
+    error text so the app shows what actually went wrong."""
+    if not configured():
+        raise SeedboxError("seedbox is not configured yet — set it in Settings")
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env())
+    if p.returncode != 0:
+        msg = (p.stderr or "").strip().splitlines()
+        raise SeedboxError(msg[-1] if msg else f"rclone exit {p.returncode}")
+    return p.stdout
+
+
+def move(rel_from: str, rel_to: str, timeout: int = 120) -> None:
+    """Rename in place on the seedbox.
+
+    The mount this relay reads through is bound READ-ONLY at two layers, so this
+    cannot go through the filesystem -- it has to be rclone talking to the remote.
+
+    `moveto` and not copy-then-delete: the FTP backend reports Move and DirMove as
+    supported (checked with `rclone backend features`), so the server renames in
+    place and a 100GB release costs the same as a small one. If that ever stopped
+    being true, rclone would silently fall back to copying the whole directory.
+    """
+    _run(["rclone", "moveto", remote_path(rel_from), remote_path(rel_to)], timeout)
+
+
+def delete(rel: str, is_dir: bool, timeout: int = 600) -> None:
+    """Remove a file or a whole directory from the seedbox.
+
+    The FTP backend does NOT support Purge, so rclone deletes each file and then
+    the directories; a large release is many round trips, hence the long timeout.
+    """
+    if is_dir:
+        _run(["rclone", "purge", remote_path(rel)], timeout)
+    else:
+        _run(["rclone", "deletefile", remote_path(rel)], timeout)
+
+
 def walk_files(rel: str, timeout: int = 300) -> list:
     """Every file under a remote path, as [{"path": relative, "size": int}].
 

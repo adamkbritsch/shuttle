@@ -96,6 +96,32 @@ def resolve_drop_target(path: str, targets=None):
     return next((t for t in targets if path == t or under(path, t)), None)
 
 
+def seedbox_depth(path: str) -> int:
+    """How many components deep under /seedbox a path sits.
+
+    /seedbox = 0, /seedbox/downloads = 1, /seedbox/downloads/<Release> = 2. The same
+    number MIN_SRC_DEPTH is expressed in, so "deep enough to copy" and "deep enough
+    to modify" cannot drift apart.
+    """
+    norm = os.path.normpath(path)
+    if not under(norm, SEEDBOX) and norm != SEEDBOX:
+        return 0
+    rel = norm[len(SEEDBOX):].strip("/")
+    return len([p for p in rel.split("/") if p])
+
+
+def _reject_shallow_seedbox(src: str, verb: str) -> None:
+    """Refuse to modify a whole level of the library.
+
+    Mirrors reject_whole_library, which guards what may be COPIED, so the same
+    shapes are refused whichever direction the operation runs in.
+    """
+    if seedbox_depth(src) < MIN_SRC_DEPTH:
+        what = "the seedbox root" if seedbox_depth(src) == 0 else to_virtual(src)
+        raise JobError(f"refusing to {verb} {what}: that is a whole level of the "
+                       f"library, not a release -- open it and act on what is inside")
+
+
 def reject_whole_library(src: str) -> None:
     """Refuse a source shallower than an individual release."""
     norm = os.path.normpath(src)
@@ -165,7 +191,18 @@ def validate_delete(path: str, require_exists: bool = True) -> str:
     src = os.path.normpath(path)
 
     if under(src, SEEDBOX):
-        raise JobError("the seedbox is read-only -- Shuttle never deletes there")
+        # Deleting on the seedbox IS allowed, but it cannot go through the
+        # filesystem: that mount is bound read-only at two layers, so api.py runs
+        # rclone against the remote instead. Everything below this branch is about
+        # the NAS side and does not apply.
+        #
+        # Note this breaks whatever torrent is still seeding the files. That is the
+        # user's explicit choice and is stated in the app's confirmation sheet;
+        # nothing here can un-break it, so nothing here pretends to.
+        _reject_shallow_seedbox(src, "delete")
+        if require_exists and not os.path.exists(src):
+            raise JobError(f"no such item: {to_virtual(src)}")
+        return src
     if resolve_drop_target(src) is None:
         raise JobError(f"{to_virtual(src)} is not somewhere this can delete")
     if src in drop_targets():
@@ -210,8 +247,19 @@ def validate_rename(path: str, new_name: str, require_exists: bool = True):
     src = os.path.normpath(path)
 
     if under(src, SEEDBOX):
-        raise JobError("the seedbox is read-only -- rename it on the NAS side "
-                       "after it has been copied")
+        # Renaming on the seedbox IS allowed, via rclone against the remote rather
+        # than the read-only mount. Same depth rule as delete, and the same caveat
+        # about the torrent that is seeding it.
+        _reject_shallow_seedbox(src, "rename")
+        if require_exists and not os.path.exists(src):
+            raise JobError(f"no such item: {to_virtual(src)}")
+        if (new_name in _BAD_NAME or "/" in new_name
+                or any(ord(c) < 32 for c in new_name)):
+            raise JobError("the new name must be a single path component")
+        dest = os.path.join(os.path.dirname(src), new_name)
+        if os.path.exists(dest):
+            raise JobError(f"{new_name} already exists here")
+        return src, dest
     if resolve_drop_target(src) is None:
         raise JobError(f"{to_virtual(src)} is not somewhere this can rename")
     # The drop-target ROOTS are the media volumes themselves; renaming one would

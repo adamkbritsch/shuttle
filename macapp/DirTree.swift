@@ -173,34 +173,37 @@ struct DirTreeView: View {
                     Task { await browse.go(to: path) }
                 }
                 Button(isOpen ? "Collapse" : "Expand") { tree.toggle(path) }
-                if browse.mode == .destinations {
-                    // Gated by depth, because the relay's guards are gated by exactly
-                    // the same thing and an item that can only ever produce an error
-                    // toast should not be in the menu at all.
-                    //
-                    // Depth 0 is /queue itself, which is the LIST of drop targets
-                    // rather than a target ("... is not somewhere this can rename").
-                    // Depth 1 is a drop-target root, which is a whole media volume
-                    // ("that is a volume, not something inside one"). Creating a
-                    // folder INSIDE a volume is the ordinary case and is allowed
-                    // there, which is why New Folder needs one level less than the
-                    // two destructive items. Verified against the live relay at each
-                    // depth rather than read off the guard source.
-                    if depth >= 2 {
-                        Button("Rename…") {
-                            onRename(Entry(name: name, path: path, isDir: true,
-                                           size: nil, mtime: nil))
-                        }
+                // Gated by depth, because the relay's guards are gated by exactly the
+                // same thing and an item that can only ever produce an error toast
+                // should not be in the menu at all. Depth 2 means the same thing on
+                // both sides, which is why one number covers both.
+                //
+                // Destination: depth 0 is /queue itself, the LIST of drop targets
+                // rather than a target; depth 1 is a drop-target root, a whole media
+                // volume ("that is a volume, not something inside one"). Creating a
+                // folder INSIDE a volume is ordinary and allowed, so New Folder needs
+                // one level less than the two destructive items.
+                //
+                // Seedbox: depth 2 is exactly MIN_SRC_DEPTH, an individual release.
+                // Anything shallower is a whole level of the library and the relay
+                // refuses to modify it, just as it refuses to copy it.
+                //
+                // Verified against the live relay at each depth rather than read off
+                // the guard source.
+                if depth >= 2 {
+                    Button("Rename…") {
+                        onRename(Entry(name: name, path: path, isDir: true,
+                                       size: nil, mtime: nil))
                     }
-                    if depth >= 1 {
-                        Button("New Folder…") { onNewFolder(path) }
-                    }
-                    if depth >= 2 {
-                        Divider()
-                        Button("Delete…", role: .destructive) {
-                            onDelete(Entry(name: name, path: path, isDir: true,
-                                           size: nil, mtime: nil))
-                        }
+                }
+                if browse.mode == .destinations, depth >= 1 {
+                    Button("New Folder…") { onNewFolder(path) }
+                }
+                if depth >= 2 {
+                    Divider()
+                    Button("Delete…", role: .destructive) {
+                        onDelete(Entry(name: name, path: path, isDir: true,
+                                       size: nil, mtime: nil))
                     }
                 }
                 Divider()

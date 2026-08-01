@@ -308,19 +308,26 @@ struct FileTable: View {
                     Task { await browse.open(e) }
                 }
             }
-            // The seedbox mount is read-only so nothing there can be renamed; the
-            // menu simply does not offer it rather than offering a guaranteed error.
-            // Gated separately, because they need different things: one item gets
-            // the plain rename sheet while several get the bulk one (which derives a
-            // distinct name per item), New Folder wants no selection at all, and
-            // deleting is happy with any number.
-            if browse.mode == .destinations, rowsAreActionable {
+            // Rename and Delete now work on BOTH sides. The seedbox mount is
+            // read-only, so the relay performs those over rclone against the remote
+            // instead of through the filesystem; the depth rule is the same one that
+            // governs what may be copied, so a whole level of the library is still
+            // refused. New Folder stays destination-only — the relay has no seedbox
+            // mkdir and offering it would be a guaranteed error.
+            //
+            // Gated separately below, because they need different things: one item
+            // gets the plain rename sheet while several get the bulk one (which
+            // derives a distinct name per item), and deleting is happy with any
+            // number.
+            if rowsAreActionable {
                 if items.count == 1, let e = items.first {
                     Button("Rename…") { onRename(e) }
                 } else if items.count > 1 {
                     Button("Rename \(items.count) Items…") { onBulkRename(ordered) }
                 }
-                Button("New Folder…") { onNewFolder() }
+                if browse.mode == .destinations {
+                    Button("New Folder…") { onNewFolder() }
+                }
                 Divider()
                 Button(items.count == 1
                        ? "Delete…"

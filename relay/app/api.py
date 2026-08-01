@@ -449,6 +449,11 @@ class Handler(BaseHTTPRequestHandler):
             raise JobError("path is required")
         src = guards.validate_delete(guards.to_real(virtual), require_exists=False)
 
+        # The seedbox cannot be written through the filesystem -- that mount is bound
+        # read-only at two layers -- so it gets its own implementation over rclone.
+        if guards.under(src, guards.SEEDBOX):
+            return self._delete_seedbox(src)
+
         # Never delete out from under a transfer. rclone would keep writing into a
         # directory that no longer exists and the job would fail in a way that looks
         # like a network fault. Overlap in EITHER direction counts: the job may be
@@ -533,6 +538,9 @@ class Handler(BaseHTTPRequestHandler):
         src, dest = guards.validate_rename(guards.to_real(virtual), new_name,
                                            require_exists=False)
 
+        if guards.under(src, guards.SEEDBOX):
+            return self._rename_seedbox(src, dest, new_name)
+
         # If a transfer is still writing into this path (or into something under
         # it), renaming now would pull the directory out from under rclone and lose
         # the transfer's progress. Record it against that job instead; the worker
@@ -567,6 +575,70 @@ class Handler(BaseHTTPRequestHandler):
         self.log(f"api renamed {guards.to_virtual(src)} -> {new_name}")
         self._send(200, {"deferred": False, "path": guards.to_virtual(dest),
                          "name": new_name})
+
+    def _seedbox_in_use(self, path):
+        """Refuse to disturb something a transfer is still READING.
+
+        The mirror of the destination checks on the NAS side. Pulling a source out
+        from under a running rclone fails the copy in a way that reads as a network
+        fault, and the partially-written destination is left behind.
+        """
+        for row in self.jobs.snapshot("queued", "running"):
+            s = row["src_real"]
+            if s == path or guards.under(s, path) or guards.under(path, s):
+                raise JobError(f"job {row['id']} is still copying from "
+                               f"{guards.to_virtual(s)} -- cancel it first")
+
+    def _delete_seedbox(self, src):
+        """Delete on the seedbox, over rclone rather than the read-only mount.
+
+        This BREAKS whatever torrent is seeding the files; that is the intended
+        behaviour and the app says so before asking for confirmation. Nothing here
+        touches qBittorrent, so the torrent is left to be cleaned up there.
+        """
+        import jobs as jobsmod
+        self._seedbox_in_use(src)
+        # Existence and the file/byte count come from the read-only mount, which is
+        # cheap. The listing the APP shows is read live over rclone, so a delete is
+        # visible on the next refresh even though this mount caches.
+        if not os.path.exists(src):
+            return self._fail(404, f"no such item: {guards.to_virtual(src)}")
+        is_dir = os.path.isdir(src)
+        files, size = _walk_count(src)
+        rel = jobsmod._src_rel(src)
+        if rel is None:
+            raise JobError(f"{guards.to_virtual(src)} is not on the seedbox remote")
+        try:
+            seedbox.delete(rel, is_dir)
+        except seedbox.SeedboxError as exc:
+            raise JobError(str(exc))
+        self.log(f"deleted on the seedbox: {guards.to_virtual(src)} "
+                 f"({files} files, {size} bytes)")
+        self._send(200, {"deleted": guards.to_virtual(src),
+                         "files": files, "bytes": size, "seedbox": True})
+
+    def _rename_seedbox(self, src, dest, new_name):
+        """Rename on the seedbox, over rclone rather than the read-only mount.
+
+        Never deferred: deferral exists for a DESTINATION that rclone is still
+        writing, where the rename can be applied afterwards. A source being read
+        cannot be renamed later to any useful effect, so this refuses instead.
+        """
+        import jobs as jobsmod
+        self._seedbox_in_use(src)
+        if not os.path.exists(src):
+            raise JobError(f"no such item: {guards.to_virtual(src)}")
+        rel_from = jobsmod._src_rel(src)
+        rel_to = jobsmod._src_rel(dest)
+        if rel_from is None or rel_to is None:
+            raise JobError(f"{guards.to_virtual(src)} is not on the seedbox remote")
+        try:
+            seedbox.move(rel_from, rel_to)
+        except seedbox.SeedboxError as exc:
+            raise JobError(str(exc))
+        self.log(f"renamed on the seedbox: {guards.to_virtual(src)} -> {new_name}")
+        self._send(200, {"deferred": False, "path": guards.to_virtual(dest),
+                         "name": new_name, "seedbox": True})
 
     def _payload(self, limit):
         return {"active": [_job_json(r) for r in self.jobs.snapshot("queued", "running")],
