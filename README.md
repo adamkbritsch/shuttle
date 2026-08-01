@@ -105,7 +105,8 @@ is no `rclone.conf` to maintain.
 ## What it does
 
 - **Two-pane browsing** with draggable, persisted splitters, sortable columns and
-  a directory tree per side.
+  a directory tree per side. Names sort the way Finder sorts them, so `Episode 2`
+  comes before `Episode 10` instead of after it.
 - **Server-to-server transfers** — the NAS fetches, the Mac watches. Live progress,
   cancel, and a queue depth you can cap.
 - **Conflict handling.** When files already exist at the destination it asks
@@ -114,10 +115,20 @@ is no `rclone.conf` to maintain.
   skip. Each maps to the rclone flag that implements it.
 - **Deferred rename.** Rename something mid-transfer and it is applied when the
   copy finishes — surviving both a closed laptop and a relay restart.
-- **Housekeeping on the NAS side** — rename, delete, and create folders from the
-  right-click menu, so a landing folder can be tidied without opening Finder.
-  Delete confirms with the file count and size, and is refused outright while a
-  transfer is writing into that path.
+- **Housekeeping on either side** — rename and delete from the right-click menu,
+  on the NAS and on the remote server alike; new folders on the NAS side. A landing
+  folder can be tidied and a badly named release corrected at the source, without
+  opening Finder or a second client. Delete confirms with the file count and size.
+- **Bulk rename.** Select several items and rename them in one pass: find and
+  replace, add a prefix or suffix, or number them sequentially. A live preview
+  shows every old and new name, and Apply stays disabled until the whole set is
+  collision-free. The renames are ordered so a batch that shuffles names among
+  itself — renumbering `01…05` to start at `02`, say — applies cleanly rather than
+  failing partway through.
+- **A queue that does what you asked.** Adding the same thing twice queues it once.
+  Adding several things at once transfers them in name order, and the relay starts
+  them in the order they were queued rather than whichever worker happened to wake
+  first.
 - **Retry** a failed transfer from the Failed tab: it re-queues the same source and
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would
@@ -141,8 +152,18 @@ The relay writes into media volumes, so the guard rails are load-bearing:
   builds its root from the guard's own view, so a destination the guard would
   reject is never even offered.
 - A source shallower than an individual release is refused, so a whole library
-  level cannot be queued by accident.
+  level cannot be queued by accident. The same depth rule governs renaming and
+  deleting on the remote side, so a whole level cannot be modified by accident
+  either.
+- Anything a transfer is currently writing into, or reading from, is refused rather
+  than quietly pulled out from under `rclone`.
 - Free space is checked before a job is queued rather than discovered mid-copy.
+
+Changes on the remote server are made by `rclone` talking to it directly, not
+through the mount the relay reads from — that is bound read-only, on purpose.
+Deleting there is real and irreversible, and anything still serving those files
+from that server will be affected. Shuttle moves and removes files; it does not
+manage whatever put them there.
 
 ## Licence
 
