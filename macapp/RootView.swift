@@ -200,15 +200,14 @@ struct RootView: View {
         // is still actionable, and the shortcut reports "select a transfer first"
         // when one plainly is selected. Drop it as soon as it leaves the active list.
         //
-        // The single-transfer case is auto-selected because there is nothing to
-        // disambiguate -- requiring a click there would make the shortcut less
-        // useful than the broken version it replaced.
+        // A lone transfer is NOT auto-selected any more. It used to be, so that ⌘⌫
+        // had an unambiguous target — but selection is drawn as a filled accent row,
+        // so the single-transfer case (which is most of the time) sat there looking
+        // permanently highlighted when the user had never clicked it. The shortcut
+        // keeps that convenience without the paint: see `cancelTarget`.
         .onChange(of: store.active) { _, now in
             if let id = selectedTransfer, !now.contains(where: { $0.id == id }) {
                 selectedTransfer = nil
-            }
-            if selectedTransfer == nil, now.count == 1 {
-                selectedTransfer = now[0].id
             }
         }
         // Selection is scoped to the queue: highlighting a row in Failed or
@@ -219,7 +218,7 @@ struct RootView: View {
             // with several transfers queued the shortcut stopped whichever happened
             // to sort first -- a destructive action on an item the user never
             // pointed at. With nothing selected it now does nothing and says so.
-            guard let id = selectedTransfer else {
+            guard let id = cancelTarget else {
                 store.show(store.active.isEmpty
                            ? "Nothing is transferring"
                            : "Select a transfer first, then press ⌘⌫", isError: false)
@@ -419,13 +418,26 @@ struct RootView: View {
         !seedbox.selectedEntries.isEmpty && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
     }
 
+    /// What ⌘⌫ acts on: whatever is selected, or the only active transfer when there
+    /// is exactly one.
+    ///
+    /// Resolved here rather than by assigning to `selectedTransfer`, which is what it
+    /// used to do. Writing it into the selection meant the row rendered as selected,
+    /// and with a single transfer running that is a permanently blue row nobody
+    /// clicked. Nothing is ambiguous about one transfer, so the shortcut can still
+    /// find it without the app claiming it is highlighted.
+    private var cancelTarget: Int? {
+        if let selectedTransfer { return selectedTransfer }
+        return store.active.count == 1 ? store.active[0].id : nil
+    }
+
     /// Everything the menu bar validates against, as one Equatable value so a single
     /// onChange keeps all four in step.
     private var menuFlags: MenuFlags {
         var f = MenuFlags()
         f.canSend = canSend
         f.canGoUp = (activePane == .seedbox ? seedbox : dest).canGoUp
-        f.hasSelectedTransfer = selectedTransfer != nil || store.active.count == 1
+        f.hasSelectedTransfer = cancelTarget != nil
         if case .live = store.status { f.isLive = true }
         return f
     }
