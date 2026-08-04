@@ -460,8 +460,17 @@ struct RootView: View {
 
     /// A destination must be a real folder inside a drop target. `/queue` itself is
     /// the list of targets, not a target, so it is not a valid destination.
+    /// Send is disabled while a replace is armed, and that is not fussiness — it
+    /// is the exact trap that lost a replace: with something armed, pressing Send
+    /// did a PLAIN copy, silently ignoring the armed state, so the new file landed
+    /// beside the old one instead of instead of it. Arming and sending are two
+    /// different intentions and the button cannot express both.
+    ///
+    /// This gates ⌘↩ and the Transfer menu item too, since both read `canSend`.
     private var canSend: Bool {
-        !seedbox.selectedEntries.isEmpty && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
+        replacing == nil
+            && !seedbox.selectedEntries.isEmpty
+            && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
     }
 
     private var actingPane: BrowseStore { actionPane ?? dest }

@@ -317,7 +317,7 @@ struct SendBar: View {
                     Text(replacing.name)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1).truncationMode(.middle)
-                    Text("— right-click what should replace it, on the left")
+                    Text("— right-click what should replace it. Send is paused.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -364,6 +364,9 @@ struct SendBar: View {
     }
 
     private var label: String {
+        // While armed, say why the button is dead rather than leaving the user to
+        // press a greyed-out Send and guess.
+        if replacing != nil { return "Replace armed — use the right-click menu, or Cancel" }
         switch sources.count {
         case 0: return "Select something on the left"
         case 1: return sources[0].name
