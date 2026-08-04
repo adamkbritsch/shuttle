@@ -191,16 +191,74 @@ struct SearchResultsList: View {
 
 /// The status line while searching. Same geometry and voice as `ListStatusLine`,
 /// which describes one folder and cannot describe a whole-tree result set.
+///
+/// Takes the store, not a String: SwiftUI treats an unchanged class REFERENCE as
+/// "nothing changed", so a parent holding the store as a plain property never
+/// re-renders when only its contents change. Anything that must track the search
+/// has to observe it directly.
 struct SearchStatusLine: View {
-    let text: String
+    @ObservedObject var search: SearchStore
 
     var body: some View {
         HStack {
-            Text(text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            Text(search.statusText)
+                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.statusLineHeight)
+    }
+}
+
+/// The whole search half of the pane: every empty state plus the results.
+///
+/// Observes the store for the same reason as above — this is what makes results
+/// appear when they arrive, and the spinner stop when they do.
+struct SearchPane: View {
+    @ObservedObject var search: SearchStore
+    let onPick: (Entry) -> Void
+
+    var body: some View {
+        if search.running && search.results.isEmpty {
+            VStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Searching \(search.scopeLabel)…")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !search.canRun {
+            centered("Type at least \(SearchStore.minQuery) characters, then press Return",
+                     symbol: "magnifyingglass")
+        } else if search.results.isEmpty, let error = search.error {
+            centered(error, symbol: "exclamationmark.triangle", tint: .orange)
+        } else if search.results.isEmpty, search.ran {
+            centered(search.timedOut
+                     ? "The search timed out before it finished. Press Return to try again — the second one is usually faster."
+                     : "No matches for “\(search.trimmed)”",
+                     symbol: "magnifyingglass")
+        } else if search.results.isEmpty {
+            centered("Press Return to search \(search.scopeLabel)",
+                     symbol: "magnifyingglass")
+        } else {
+            SearchResultsList(results: search.results, onPick: onPick)
+        }
+    }
+
+    private func centered(_ text: String, symbol: String,
+                          tint: Color = .secondary) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(tint == .orange
+                                 ? Color(nsColor: .systemOrange) : Color.secondary.opacity(0.7))
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -249,6 +307,8 @@ struct SearchBar: View {
                 ProgressView().controlSize(.small).scaleEffect(0.65)
             }
             Button {
+                draft = ""
+                search.clear()
                 exitSearch()
             } label: {
                 Image(systemName: "xmark.circle.fill").font(.system(size: 11))

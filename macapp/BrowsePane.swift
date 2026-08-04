@@ -23,20 +23,24 @@ struct BrowsePane: View {
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
-    /// Destination side only; nil leaves this pane exactly as it was.
+    /// nil leaves this pane exactly as it was before search existed.
     var search: SearchStore? = nil
+    /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
+    /// properties to decide whether to re-run its body, and an unchanged class
+    /// reference counts as unchanged — so branching on `search.active` directly
+    /// meant the pane never noticed search mode being entered or left.
+    var searchActive: Bool = false
     var onPickResult: (Entry) -> Void = { _ in }
-
-    private var searching: Bool { search?.active == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PathBar(browse: browse, title: title, search: search)
+            PathBar(browse: browse, title: title,
+                    search: search, searchActive: searchActive)
             Divider().overlay(Theme.hairline)
             content
             Divider().overlay(Theme.hairline)
-            if let search, search.active {
-                SearchStatusLine(text: search.statusText)
+            if let search, searchActive {
+                SearchStatusLine(search: search)
             } else {
                 ListStatusLine(browse: browse, connected: connected)
             }
@@ -52,8 +56,8 @@ struct BrowsePane: View {
 
     @ViewBuilder
     private var content: some View {
-        if let search, search.active {
-            results(search)
+        if let search, searchActive {
+            SearchPane(search: search, onPick: onPickResult)
         } else if let error = browse.error, browse.entries.isEmpty {
             failure(error)
         } else {
@@ -80,35 +84,6 @@ struct BrowsePane: View {
                         .frame(maxWidth: .infinity).padding(.top, 24)
                 }
             }
-        }
-    }
-
-    /// Search mode. Every branch here is an EMPTY STATE rather than an error
-    /// treatment, except a genuine relay failure — "no matches" is an answer, not
-    /// a fault, and dressing it up as one would be wrong.
-    @ViewBuilder
-    private func results(_ search: SearchStore) -> some View {
-        if search.running && search.results.isEmpty {
-            VStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Searching \(search.scopeLabel)…")
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if !search.canRun {
-            centered("Type at least \(SearchStore.minQuery) characters, then press Return",
-                     symbol: "magnifyingglass")
-        } else if search.results.isEmpty, let error = search.error {
-            failure(error)
-        } else if search.results.isEmpty, search.ran {
-            centered(search.timedOut
-                     ? "The search timed out before it finished. Press Return to try again — the second one is usually fast."
-                     : "No matches for “\(search.trimmed)”",
-                     symbol: "magnifyingglass")
-        } else if search.results.isEmpty {
-            centered("Press Return to search \(search.scopeLabel)", symbol: "magnifyingglass")
-        } else {
-            SearchResultsList(results: search.results, onPick: onPickResult)
         }
     }
 
@@ -159,6 +134,7 @@ private struct PathBar: View {
     @ObservedObject var browse: BrowseStore
     let title: String
     var search: SearchStore? = nil
+    var searchActive: Bool = false
 
     @State private var draft = ""
     @State private var editing = false
@@ -167,7 +143,7 @@ private struct PathBar: View {
     @FocusState private var filterFocused: Bool
 
     var body: some View {
-        if let search, search.active {
+        if let search, searchActive {
             SearchBar(search: search)
         } else {
             browsing

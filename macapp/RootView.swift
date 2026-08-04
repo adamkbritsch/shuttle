@@ -407,6 +407,7 @@ struct RootView: View {
                                onQueueRenamed: { e, name in enqueue([e], as: name) },
                                onBulkRename: { beginBulkRename($0, in: browse, tree: tree) },
                                search: search,
+                               searchActive: search.active,
                                onPickResult: { pickResult($0, in: browse, tree: tree) })
                     footer()
                 }
