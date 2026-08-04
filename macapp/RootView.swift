@@ -34,6 +34,8 @@ struct RootView: View {
     /// Which side the user last acted on, so a global shortcut acts where they are
     /// looking. Selection and navigation are the only two ways to "be" in a pane.
     @State private var activePane: BrowseStore.Mode = .seedbox
+    /// The row a picked search result asked the table to show.
+    @State private var revealPath: String?
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -408,7 +410,8 @@ struct RootView: View {
                                onBulkRename: { beginBulkRename($0, in: browse, tree: tree) },
                                search: search,
                                searchActive: search.active,
-                               onPickResult: { pickResult($0, in: browse, tree: tree) })
+                               onPickResult: { pickResult($0, in: browse, tree: tree) },
+                               reveal: revealPath)
                     footer()
                 }
             },
@@ -448,12 +451,15 @@ struct RootView: View {
     /// without paying for a second walk.
     private func pickResult(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
         (pane.mode == .seedbox ? sourceSearch : search).dismiss()
-        let target = entry.isDir
-            ? entry.path
-            : (entry.path as NSString).deletingLastPathComponent
+        // Always the CONTAINING folder, for a folder result as much as a file:
+        // "show me where this is" is the question search answers, and opening a
+        // folder answers a different one. The item is selected on arrival, so what
+        // you searched for is the thing highlighted.
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        revealPath = entry.path
         Task {
-            await pane.go(to: target, revealing: entry.isDir ? nil : entry.path)
-            tree.refresh(target)
+            await pane.go(to: parent, revealing: entry.path)
+            tree.refresh(parent)
         }
     }
 

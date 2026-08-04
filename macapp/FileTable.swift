@@ -84,6 +84,9 @@ struct FileTable: View {
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
+    /// A row to scroll into view once it exists — how a picked search result is
+    /// actually shown rather than merely selected.
+    var reveal: String? = nil
 
     @State private var sortOrder = [KeyPathComparator(\Entry.sortName)]
     @State private var customization = TableColumnCustomization<Entry>()
@@ -117,6 +120,12 @@ struct FileTable: View {
     }
 
     private func isParent(_ e: Entry) -> Bool { e.name == ".." }
+
+    /// Where the revealed row sits in the CURRENT sort, or nil when it is not here.
+    private var revealRow: Int? {
+        guard let reveal else { return nil }
+        return rows.firstIndex { $0.path == reveal }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,6 +182,7 @@ struct FileTable: View {
             // skeleton loader. Finder still stripes; Transmit and ForkLift do not, and
             // without it the pane reads as one clean surface. Hover and selection
             // carry row tracking on their own.
+            .background(TableRowScroller(row: revealRow))
             .tableStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
             .background(Theme.listFill)
@@ -436,4 +446,53 @@ struct ListStatusLine: View {
 
     static func files(_ n: Int) -> String { "\(n) file\(n == 1 ? "" : "s")" }
     static func dirs(_ n: Int) -> String { "\(n) director\(n == 1 ? "y" : "ies")" }
+}
+
+
+/// Scrolls the enclosing table to a row.
+///
+/// SwiftUI's `Table` has no scroll-to-selection, and `ScrollViewReader` does not
+/// work on its rows — so selecting a search result would highlight something the
+/// user cannot see whenever the folder is longer than the pane. This reaches the
+/// `NSTableView` underneath and scrolls it.
+///
+/// Walks UP from its own backing view and searches each ancestor's subtree, so it
+/// finds the table it is attached to rather than whichever one happens to be first
+/// in the window — there are three (two panes and the transfer list).
+private struct TableRowScroller: NSViewRepresentable {
+    let row: Int?
+
+    final class Coordinator { var last: Int? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard let row, context.coordinator.last != row else { return }
+        context.coordinator.last = row
+        // Next runloop turn: the reveal is set as the new listing publishes, and the
+        // table has not laid out its rows yet at this point.
+        DispatchQueue.main.async {
+            guard let table = Self.table(near: view), row < table.numberOfRows else { return }
+            table.scrollRowToVisible(row)
+        }
+    }
+
+    private static func table(near view: NSView) -> NSTableView? {
+        var node: NSView? = view
+        var hops = 0
+        while let current = node, hops < 8 {
+            if let found = descendant(of: current) { return found }
+            node = current.superview
+            hops += 1
+        }
+        return nil
+    }
+
+    private static func descendant(of view: NSView) -> NSTableView? {
+        if let t = view as? NSTableView { return t }
+        for sub in view.subviews {
+            if let t = descendant(of: sub) { return t }
+        }
+        return nil
+    }
 }

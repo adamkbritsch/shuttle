@@ -31,6 +31,8 @@ struct BrowsePane: View {
     /// meant the pane never noticed search mode being entered or left.
     var searchActive: Bool = false
     var onPickResult: (Entry) -> Void = { _ in }
+    /// Set after picking a search result, so the table can scroll to it.
+    var reveal: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -70,7 +72,8 @@ struct BrowsePane: View {
                           onDelete: onDelete,
                           onNewFolder: onNewFolder,
                           onQueueRenamed: onQueueRenamed,
-                          onBulkRename: onBulkRename)
+                          onBulkRename: onBulkRename,
+                          reveal: reveal)
                 if let error = browse.error {
                     Text(error)
                         .font(.system(size: 10.5))
