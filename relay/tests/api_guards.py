@@ -88,12 +88,14 @@ print("== search ==")
 # Ground truth measured directly on the volumes; these are the numbers that catch a
 # walk that silently stops early or starts skipping a root.
 for term, want_total in [("ted lasso", 2), ("reacher", 26), ("1080p", 7008)]:
-    code, body = call("GET", "/v1/search?q=" + urllib.parse.quote(term))
+    # body_full only, no probe through call(): call()'s 20s timeout is right for
+    # the guard checks and too short for a COLD search, which measured 7.4s warm
+    # and past 25s cold. The probe added nothing but a spurious "http 0".
     try:
         got = json.loads(body_full("/v1/search?q=" + urllib.parse.quote(term)))["total"]
     except Exception as exc:
         got = f"error {exc}"
-    say(f"search {term!r} total", want_total, got, f"http {code}")
+    say(f"search {term!r} total", want_total, got)
 
 # The cap must not come from whichever volume sorts first. Before this was fixed a
 # 500-row search returned 500 rows from Media and none at all from MediaVolume3.
