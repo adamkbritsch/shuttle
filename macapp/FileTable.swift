@@ -473,8 +473,32 @@ private struct TableRowScroller: NSViewRepresentable {
         // table has not laid out its rows yet at this point.
         DispatchQueue.main.async {
             guard let table = Self.table(near: view), row < table.numberOfRows else { return }
-            table.scrollRowToVisible(row)
+            Self.centre(table, on: row)
         }
+    }
+
+    /// Puts the row in the MIDDLE of the pane, not merely on screen.
+    ///
+    /// `scrollRowToVisible` does the least work that satisfies "visible", so a row
+    /// below the fold ends up flush against the bottom edge — technically revealed,
+    /// but it reads as the last thing in the folder rather than as the thing you
+    /// searched for. Centring it also shows the neighbours either side, which is
+    /// most of the value of being shown where something lives.
+    ///
+    /// Clamped at both ends, so a row near the start or end of a folder simply sits
+    /// as close to centre as the list allows instead of scrolling into blank space.
+    private static func centre(_ table: NSTableView, on row: Int) {
+        guard let clip = table.enclosingScrollView?.contentView else {
+            table.scrollRowToVisible(row)          // no scroll view: better than nothing
+            return
+        }
+        let rect = table.rect(ofRow: row)
+        guard rect.height > 0 else { return }
+        let limit = max(0, table.bounds.height - clip.bounds.height)
+        var y = rect.midY - clip.bounds.height / 2
+        y = min(max(0, y), limit)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+        table.enclosingScrollView?.reflectScrolledClipView(clip)
     }
 
     private static func table(near view: NSView) -> NSTableView? {
