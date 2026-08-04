@@ -133,8 +133,15 @@ is no `rclone.conf` to maintain.
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would
   otherwise arrive as a rejection is visible before you queue anything.
-- **Filter** either pane. Client-side over the listing already fetched, so typing
-  never triggers a fresh directory read.
+- **Search** either side, recursively, from the right-click magnifier or ⌘F. The
+  NAS side walks every destination volume at once; the remote side asks rclone for
+  one recursive listing. Results show what matched and the folder it is in, and
+  picking one takes you there — a folder opens, a file's folder opens with the file
+  selected. Results are find-only by design: nothing destructive is reachable from
+  a list whose rows come from all over the tree.
+- **Filter** either pane, collapsed behind an icon beside Search. Client-side over
+  the listing already fetched, so typing never triggers a fresh directory read —
+  which is what makes it instant and what makes Search a separate thing.
 
 ### One thing it deliberately does not do
 

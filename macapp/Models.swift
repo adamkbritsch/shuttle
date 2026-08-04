@@ -49,6 +49,25 @@ struct Listing: Decodable, Equatable {
     let truncated: Bool
 }
 
+/// A whole-NAS search result set.
+///
+/// Not a `Listing`: a search has no single `path` or `parent`, and its `truncated`
+/// means something different — "more matched than we returned", which is why
+/// `timedOut` is a separate fact rather than folded into it.
+struct SearchResults: Decodable, Equatable {
+    let query: String
+    let entries: [Entry]
+    /// Every match, even when only `limit` came back, so the UI can say
+    /// "500 of 7,008" instead of quietly implying 500 is all there is.
+    let total: Int
+    let limit: Int
+    let truncated: Bool
+    /// The walk stopped early, so `total` is itself incomplete. Distinct from
+    /// `truncated`: a timeout with no rows is NOT "no matches".
+    let timedOut: Bool
+    let elapsedMs: Int
+}
+
 struct Target: Decodable, Identifiable, Equatable {
     let name: String
     let path: String

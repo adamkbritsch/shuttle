@@ -530,9 +530,18 @@ final class BrowseStore: ObservableObject {
         await reload()
     }
 
-    func go(to p: String) async {
+    /// `revealing` selects one entry after the listing lands — how a search result
+    /// is shown in its real folder. A defaulted parameter so every existing caller
+    /// (path bar, recents menu, tree, delete recovery) is untouched.
+    func go(to p: String, revealing reveal: String? = nil) async {
         path = p
         selection = []
-        await reload()
+        let ok = await reload()
+        // AFTER the reload, and only on success: reload() prunes `selection` to
+        // entries that exist, so setting it first would be wiped -- and a failed
+        // listing must not leave a selection pointing at rows nobody can see.
+        if ok, let reveal, entries.contains(where: { $0.path == reveal }) {
+            selection = [reveal]
+        }
     }
 }

@@ -8,6 +8,12 @@ struct RootView: View {
     @StateObject private var splits = SplitTreeHandle()
     @StateObject private var sourceTree: TreeStore
     @StateObject private var destTree: TreeStore
+    /// One search per side. They look identical and are not: the NAS is a local
+    /// walk, the seedbox is one rclone recursive listing over FTP that takes ~19s
+    /// every time. Separate stores so a slow remote search cannot blank the NAS
+    /// results, and so each remembers its own query.
+    @StateObject private var search: SearchStore
+    @StateObject private var sourceSearch: SearchStore
     @State private var showSettings = false
     @State private var tab: TransfersPane.Tab = .queued
     @State private var booted = false
@@ -40,6 +46,8 @@ struct RootView: View {
         _dest = StateObject(wrappedValue: BrowseStore(mode: .destinations, api: s.api, store: s))
         _sourceTree = StateObject(wrappedValue: TreeStore(api: s.api))
         _destTree = StateObject(wrappedValue: TreeStore(api: s.api))
+        _search = StateObject(wrappedValue: SearchStore(api: s.api, side: "nas"))
+        _sourceSearch = StateObject(wrappedValue: SearchStore(api: s.api, side: "seedbox"))
     }
 
     var body: some View {
@@ -185,7 +193,8 @@ struct RootView: View {
         .modifier(MenuBridge(flags: menuFlags,
                              sourceSelection: seedbox.selection, sourcePath: seedbox.path,
                              destSelection: dest.selection, destPath: dest.path,
-                             activePane: $activePane))
+                             activePane: $activePane,
+                             onFind: { (activePane == .seedbox ? sourceSearch : search).active = true }))
         .onReceive(NotificationCenter.default.publisher(for: .shuttleRefresh)) { _ in
             Task { await refreshAll() }
         }
@@ -335,7 +344,7 @@ struct RootView: View {
                         // panes share growth instead of one pinning to its minimum.
                         SplitChild(SplitPaneSpec(min: Theme.paneMinWidth,
                                                  holdingPriority: Theme.Hold.absorbs),
-                                   column(key: "source.split", browse: seedbox,
+                                   column(key: "source.split", search: sourceSearch, browse: seedbox,
                                           tree: sourceTree, title: "SEEDBOX",
                                           treeRoot: "/seedbox",
                                           // Starts collapsed so the seedbox tree's
@@ -343,7 +352,7 @@ struct RootView: View {
                                           startsCollapsed: true) { EmptyView() }),
                         SplitChild(SplitPaneSpec(min: Theme.paneMinWidth,
                                                  holdingPriority: Theme.Hold.absorbs),
-                                   column(key: "dest.split", browse: dest,
+                                   column(key: "dest.split", search: search, browse: dest,
                                           tree: destTree, title: "DESTINATION",
                                           treeRoot: "/queue",
                                           // NAS volumes are a small, near-static set.
@@ -368,6 +377,7 @@ struct RootView: View {
     /// menu hides it) but is NEVER omitted from the hierarchy: SplitTree pushes leaf
     /// views positionally, so a changing leaf count would silently stop all updates.
     private func column(key: String,
+                        search: SearchStore,
                         browse: BrowseStore,
                         tree: TreeStore,
                         title: String,
@@ -395,7 +405,9 @@ struct RootView: View {
                                onDelete: { beginDelete($0, in: browse, tree: tree) },
                                onNewFolder: { beginNewFolder(dest.path) },
                                onQueueRenamed: { e, name in enqueue([e], as: name) },
-                               onBulkRename: { beginBulkRename($0, in: browse, tree: tree) })
+                               onBulkRename: { beginBulkRename($0, in: browse, tree: tree) },
+                               search: search,
+                               onPickResult: { pickResult($0, in: browse, tree: tree) })
                     footer()
                 }
             },
@@ -426,6 +438,23 @@ struct RootView: View {
 
     private var actingPane: BrowseStore { actionPane ?? dest }
     private var actingTree: TreeStore { actionTree ?? destTree }
+
+    /// A search result is find-only, so picking one is purely navigation.
+    ///
+    /// A folder IS the place you were looking for, so go inside it. A file is not,
+    /// so go to its folder and select it there — which is what `revealing:` is for.
+    /// Search mode closes but the results are kept, so ⌘F brings them straight back
+    /// without paying for a second walk.
+    private func pickResult(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
+        (pane.mode == .seedbox ? sourceSearch : search).dismiss()
+        let target = entry.isDir
+            ? entry.path
+            : (entry.path as NSString).deletingLastPathComponent
+        Task {
+            await pane.go(to: target, revealing: entry.isDir ? nil : entry.path)
+            tree.refresh(target)
+        }
+    }
 
     /// What ⌘⌫ acts on: whatever is selected, or the only active transfer when there
     /// is exactly one.
@@ -1036,6 +1065,7 @@ private struct MenuBridge: ViewModifier {
     let destSelection: Set<String>
     let destPath: String
     @Binding var activePane: BrowseStore.Mode
+    let onFind: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -1046,5 +1076,8 @@ private struct MenuBridge: ViewModifier {
             .onChange(of: sourcePath) { _, _ in activePane = .seedbox }
             .onChange(of: destSelection) { _, _ in activePane = .destinations }
             .onChange(of: destPath) { _, _ in activePane = .destinations }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleFind)) { _ in
+                onFind()
+            }
     }
 }

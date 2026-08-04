@@ -1,8 +1,14 @@
 import SwiftUI
 
 /// One side of the browse area: an editable path bar, the file table, and a status
-/// line. Mirrors FileZilla's `CView` — header, list, status bar — minus the pieces
-/// that have no referent here (quick search, recursive-operation footer).
+/// line. Mirrors FileZilla's `CView` — header, list, status bar — minus the
+/// recursive-operation footer, which has no referent here.
+///
+/// `search` is nil for the seedbox pane, and that is the whole safety story for
+/// this shared view: with it nil the code path is exactly what it was before
+/// search existed. Only the NAS side can be searched, because only it is a local
+/// disk — the seedbox is rclone over FTP, where a recursive walk would be
+/// thousands of round trips.
 ///
 /// The tree/list divider is NOT nested here: SplitTree owns every split, so RootView
 /// composes the tree pane and this pane as siblings.
@@ -17,14 +23,23 @@ struct BrowsePane: View {
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
+    /// Destination side only; nil leaves this pane exactly as it was.
+    var search: SearchStore? = nil
+    var onPickResult: (Entry) -> Void = { _ in }
+
+    private var searching: Bool { search?.active == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PathBar(browse: browse, title: title)
+            PathBar(browse: browse, title: title, search: search)
             Divider().overlay(Theme.hairline)
             content
             Divider().overlay(Theme.hairline)
-            ListStatusLine(browse: browse, connected: connected)
+            if let search, search.active {
+                SearchStatusLine(text: search.statusText)
+            } else {
+                ListStatusLine(browse: browse, connected: connected)
+            }
         }
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.cardFill)
@@ -37,7 +52,9 @@ struct BrowsePane: View {
 
     @ViewBuilder
     private var content: some View {
-        if let error = browse.error, browse.entries.isEmpty {
+        if let search, search.active {
+            results(search)
+        } else if let error = browse.error, browse.entries.isEmpty {
             failure(error)
         } else {
             ZStack(alignment: .top) {
@@ -63,6 +80,35 @@ struct BrowsePane: View {
                         .frame(maxWidth: .infinity).padding(.top, 24)
                 }
             }
+        }
+    }
+
+    /// Search mode. Every branch here is an EMPTY STATE rather than an error
+    /// treatment, except a genuine relay failure — "no matches" is an answer, not
+    /// a fault, and dressing it up as one would be wrong.
+    @ViewBuilder
+    private func results(_ search: SearchStore) -> some View {
+        if search.running && search.results.isEmpty {
+            VStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Searching \(search.scopeLabel)…")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !search.canRun {
+            centered("Type at least \(SearchStore.minQuery) characters, then press Return",
+                     symbol: "magnifyingglass")
+        } else if search.results.isEmpty, let error = search.error {
+            failure(error)
+        } else if search.results.isEmpty, search.ran {
+            centered(search.timedOut
+                     ? "The search timed out before it finished. Press Return to try again — the second one is usually fast."
+                     : "No matches for “\(search.trimmed)”",
+                     symbol: "magnifyingglass")
+        } else if search.results.isEmpty {
+            centered("Press Return to search \(search.scopeLabel)", symbol: "magnifyingglass")
+        } else {
+            SearchResultsList(results: search.results, onPick: onPickResult)
         }
     }
 
@@ -112,12 +158,23 @@ struct BrowsePane: View {
 private struct PathBar: View {
     @ObservedObject var browse: BrowseStore
     let title: String
+    var search: SearchStore? = nil
 
     @State private var draft = ""
     @State private var editing = false
+    @State private var filterOpen = false
     @FocusState private var focused: Bool
+    @FocusState private var filterFocused: Bool
 
     var body: some View {
+        if let search, search.active {
+            SearchBar(search: search)
+        } else {
+            browsing
+        }
+    }
+
+    private var browsing: some View {
         HStack(spacing: 8) {
             ChromeButton(symbol: "chevron.left", help: "Enclosing folder (⌘↑)",
                          enabled: browse.canGoUp) {
@@ -165,25 +222,47 @@ private struct PathBar: View {
                 .help("Recent folders")
             }
 
+            if let search {
+                ChromeButton(symbol: "magnifyingglass", help: "Search \(search.scopeLabel) (⌘F)") {
+                    search.active = true
+                }
+            }
+
             // Filter. Client-side over the page already fetched, so typing never
             // triggers a listing -- a cold one costs over a second.
-            HStack(spacing: 4) {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                TextField("Filter", text: $browse.filter)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11))
-                    .frame(width: 96)
-                if !browse.filter.isEmpty {
-                    Button { browse.filter = "" } label: {
+            //
+            // Collapsed to an icon like Search, because a permanent 96pt field left
+            // the path field almost nothing at the 330pt minimum pane width. It
+            // expands on click and stays expanded while it holds text: a filter
+            // hides rows, so it must never be possible to have one applied with no
+            // visible sign of it.
+            if filterOpen || !browse.filter.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                    TextField("Filter", text: $browse.filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .frame(width: 96)
+                        .focused($filterFocused)
+                    Button {
+                        browse.filter = ""
+                        filterOpen = false
+                    } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 9))
                     }
                     .buttonStyle(.plain).foregroundStyle(.tertiary)
                 }
+                .padding(.horizontal, 6).frame(height: 21)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.pillFill))
+                .onAppear { filterFocused = true }
+            } else {
+                ChromeButton(symbol: "line.3.horizontal.decrease",
+                             help: "Filter this folder") {
+                    filterOpen = true
+                }
             }
-            .padding(.horizontal, 6).frame(height: 21)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.pillFill))
 
             if browse.loading {
                 ProgressView().controlSize(.small).scaleEffect(0.65)
@@ -192,7 +271,10 @@ private struct PathBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .onAppear { draft = browse.path }
-        .onChange(of: browse.path) { _, new in if !editing { draft = new } }
+        .onChange(of: browse.path) { _, new in
+            if !editing { draft = new }
+            filterOpen = false          // reload() clears the filter itself
+        }
     }
 
     private func commit() {

@@ -18,6 +18,10 @@ enum SeedboxSaveResult { case saved(SeedboxConfig, SeedboxProbe?); case failed(S
 enum SettingsResult { case settings(RelaySettings); case refused(String); case unreachable(String) }
 enum RenameResult { case renamed(String); case deferred(String); case refused(String); case unauthorized; case unreachable(String) }
 enum VerifyOutcome { case result(VerifyResult); case refused(String); case unreachable(String) }
+/// `busy` is the relay's 503 when a search is already running. Deliberately its own
+/// case and NOT `.refused`: the user is typing, not doing something wrong, so it
+/// must be possible to keep the previous results on screen and say nothing.
+enum SearchOutcome { case results(SearchResults); case busy; case refused(String); case unauthorized; case unreachable(String) }
 
 actor RelayAPI {
     private let session: URLSession
@@ -74,6 +78,15 @@ actor RelayAPI {
     /// showed "Timed out" on a listing that was merely slow.
     static let pollTimeout: TimeInterval = 8
     static let browseTimeout: TimeInterval = 40
+    /// Longer than the relay's own 25s search deadline, on purpose: the server
+    /// stopping early and SAYING so (`timed_out`) is far more useful than the
+    /// client giving up first and reporting a bare timeout. 40s would be needlessly
+    /// patient for something measured at 0.45s warm.
+    /// Must clear the SLOWER of the two sides. The remote walk is one rclone
+    /// recursive listing over FTP, measured at 18.9-20.8s with no warm case, and
+    /// the relay allows it 120s. 30s would have failed a remote search that was
+    /// working perfectly.
+    static let searchTimeout: TimeInterval = 60
 
     private func request(_ path: String, method: String = "GET",
                          body: [String: String]? = nil,
@@ -157,6 +170,29 @@ actor RelayAPI {
                 return .refused("Could not read that listing")
             }
             return .listing(l)
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    /// Whole-NAS recursive name search. Destination side only — the seedbox is
+    /// rclone over FTP, where this walk would be thousands of round trips.
+    func search(_ query: String, side: String, limit: Int? = nil) async -> SearchOutcome {
+        var q = "v1/search?q=\(escape(query))&side=\(side)"
+        if let limit { q += "&limit=\(limit)" }
+        guard let r = request(q, timeout: RelayAPI.searchTimeout) else {
+            return .unreachable("Bad base URL")
+        }
+        do {
+            let (data, resp) = try await session.data(for: r)
+            guard let http = resp as? HTTPURLResponse else { return .unreachable("No response") }
+            if http.statusCode == 401 { return .unauthorized }
+            if http.statusCode == 503 { return .busy }
+            if http.statusCode >= 400 {
+                return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
+            }
+            guard let out = try? Wire.decoder.decode(SearchResults.self, from: data) else {
+                return .refused("Could not read those results")
+            }
+            return .results(out)
         } catch { return .unreachable(RelayAPI.describe(error)) }
     }
 

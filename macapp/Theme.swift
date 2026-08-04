@@ -278,4 +278,5 @@ extension Notification.Name {
     static let shuttleToggleDestTree = Notification.Name("shuttle.toggleDestTree")
     static let shuttleToggleQueue = Notification.Name("shuttle.toggleQueue")
     static let shuttleResetLayout = Notification.Name("shuttle.resetLayout")
+    static let shuttleFind = Notification.Name("shuttle.find")
 }

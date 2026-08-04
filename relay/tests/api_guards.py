@@ -29,6 +29,15 @@ def call(method, path, body=None, token=TOKEN, ctype="application/json"):
         return 0, f"{type(e).__name__}: {e}"
 
 
+def body_full(path):
+    """call() truncates to 200 chars, which is right for error text and useless for
+    a result set."""
+    req = urllib.request.Request(BASE + path, method="GET")
+    req.add_header("Authorization", "Bearer " + TOKEN)
+    with urllib.request.urlopen(req, timeout=90) as r:
+        return r.read().decode()
+
+
 def say(label, want, got, extra=""):
     ok = "PASS" if got == want else "**FAIL**"
     print(f"  {ok}  {label:<46} want {want} got {got} {extra}")
@@ -74,6 +83,57 @@ for pth, label, want in [("/../../etc", "browse traversal", 400),
                          ("/data", "browse /data (in-tree, absent)", 404)]:
     code, body = call("GET", "/v1/browse?path=" + pth)
     say(label, want, code, body.strip()[:70])
+
+print("== search ==")
+# Ground truth measured directly on the volumes; these are the numbers that catch a
+# walk that silently stops early or starts skipping a root.
+for term, want_total in [("ted lasso", 2), ("reacher", 26), ("1080p", 7008)]:
+    code, body = call("GET", "/v1/search?q=" + urllib.parse.quote(term))
+    try:
+        got = json.loads(body_full("/v1/search?q=" + urllib.parse.quote(term)))["total"]
+    except Exception as exc:
+        got = f"error {exc}"
+    say(f"search {term!r} total", want_total, got, f"http {code}")
+
+# The cap must not come from whichever volume sorts first. Before this was fixed a
+# 500-row search returned 500 rows from Media and none at all from MediaVolume3.
+d = json.loads(body_full("/v1/search?q=1080p&limit=500"))
+vols = {e["path"].split("/")[2] for e in d["entries"]}
+say("search spans >1 volume", True, len(vols) > 1, str(sorted(vols)))
+say("search reports true total", True, d["total"] > len(d["entries"]), f"{len(d['entries'])} of {d['total']}")
+
+# Scope: the guard's own view of the drop targets, never os.listdir(QUEUE).
+say("no _active/_done in results", 0,
+    sum(1 for e in d["entries"] if "/_active" in e["path"] or "/_done" in e["path"]))
+say("every path is virtual", True, all(e["path"].startswith("/queue/") for e in d["entries"]))
+say("no '..' path component", True,
+    all(".." not in e["path"].split("/") for e in d["entries"]))
+say("no hidden names by default", True,
+    all(not e["name"].startswith(".") for e in d["entries"]))
+
+# Input handling.
+for qs, label, want in [("q=a", "search 1 char refused", 400),
+                        ("q=", "search empty refused", 400),
+                        ("", "search missing q refused", 400),
+                        ("q=%20%20", "search whitespace refused", 400),
+                        ("q=reacher&side=bogus", "search bad side refused", 400)]:
+    code, body = call("GET", "/v1/search?" + qs)
+    say(label, want, code, body.strip()[:50])
+say("search limit clamped", 2000,
+    json.loads(body_full("/v1/search?q=ep&limit=99999"))["limit"])
+
+# Two identical calls must agree, or the top-N window is nondeterministic and no
+# assertion above is trustworthy.
+a = json.loads(body_full("/v1/search?q=mkv&limit=100"))["entries"]
+b = json.loads(body_full("/v1/search?q=mkv&limit=100"))["entries"]
+say("search order deterministic", True, a == b)
+
+# The remote side is a different implementation (one rclone recursive listing) and
+# is slow enough that it gets its own budget -- so it needs its own assertion.
+sb = json.loads(body_full("/v1/search?q=zootopia&side=seedbox"))
+say("seedbox search scoped", True,
+    all(e["path"].startswith("/seedbox/") for e in sb["entries"]),
+    f"{len(sb['entries'])} results")
 
 print("== nothing was created ==")
 for chk in ["/srv/tree/queue/_scratch/Movis", "/srv/tree/queue/_active/OpenVPN"]:

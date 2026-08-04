@@ -146,6 +146,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        // Find lives in Edit by macOS convention. One plain item, not a Find
+        // submenu: Find Next/Previous would advertise behaviour that does not exist.
+        let find = NSMenuItem(title: "Find on the NAS…", action: #selector(findOnNAS),
+                              keyEquivalent: "f")
+        find.target = self
+        edit.addItem(find)
         editItem.submenu = edit
         main.addItem(editItem)
 
@@ -206,6 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case #selector(sendToNAS):    return MenuState.shared.flags.canSend
             case #selector(goUp):         return MenuState.shared.flags.canGoUp
             case #selector(refresh):      return MenuState.shared.flags.isLive
+        // Same rule as Refresh: searching an unreachable relay is pointless. Note
+        // the `default: return true` below means a forgotten case ships permanently
+        // enabled, which is exactly the bug this whole method was added to fix.
+        case #selector(findOnNAS):    return MenuState.shared.flags.isLive
             case #selector(stopTransfer): return MenuState.shared.flags.hasSelectedTransfer
             default:                      return true
             }
@@ -216,6 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // SwiftUI tree stay decoupled.
     @objc private func openSettings() { NotificationCenter.default.post(name: .shuttleSettings, object: nil) }
     @objc func refresh() { NotificationCenter.default.post(name: .shuttleRefresh, object: nil) }
+    @objc func findOnNAS() { NotificationCenter.default.post(name: .shuttleFind, object: nil) }
     @objc func sendToNAS() { NotificationCenter.default.post(name: .shuttleSend, object: nil) }
     @objc func goUp() { NotificationCenter.default.post(name: .shuttleUp, object: nil) }
     @objc func stopTransfer() { NotificationCenter.default.post(name: .shuttleCancel, object: nil) }
