@@ -9,15 +9,56 @@ only thing that proves it did not change behaviour is a byte-for-byte diff of th
 Driven from the NAS on purpose, so the Mac is structurally uninvolved.
 Read-only apart from writes into /queue/_scratch, which is the stack's own data/test.
 """
-import os
-import ftplib, os, sqlite3, sys, time
+import ftplib, os, sqlite3, subprocess, sys, time
 
 HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
 PORT = int(os.environ.get("FTP_PORT", "2121"))
 DB = os.environ.get("RELAY_DB", "./data/jobs.db")
 SCRATCH = "/queue/_scratch"
-META = "8033FEA0AC5A584CEB10163FB2475D9ECC132F7E.meta"
+CONTAINER = os.environ.get("RELAY_CONTAINER", "seedbox-ftp-relay")
+
+# The suite used to point at a hardcoded file that simply happened to be on the
+# remote server. Those come and go, and when that one was removed every rename
+# assertion began failing with "No such file or directory" -- a red suite that said
+# nothing whatever about the code, which is the worst kind of test. The fixture is
+# created and removed here instead, so the suite depends on nothing but itself.
+#
+# It must be TINY: several assertions use the `Name@Volume` rename that enqueues a
+# real copy, and borrowing an arbitrary release would start a hundred-gigabyte
+# transfer as a side effect of running the tests.
+META = "shuttle-ftp-regression.txt"
 SRC = f"/seedbox/downloads/{META}"
+
+
+def _rclone(*args):
+    """rclone against the remote, using the relay's own stored credentials."""
+    code = ("import sys, subprocess; sys.path.insert(0, '/app'); import seedbox; "
+            "sys.exit(subprocess.run(['rclone'] + %r, env=seedbox.env()).returncode)"
+            % (list(args),))
+    return subprocess.run(["docker", "exec", CONTAINER, "python3", "-c", code],
+                          capture_output=True, text=True).returncode
+
+
+def make_fixture():
+    subprocess.run(["docker", "exec", CONTAINER, "sh", "-c",
+                    f"printf 'shuttle ftp regression fixture' > /tmp/{META}"],
+                   check=True, capture_output=True)
+    if _rclone("copyto", f"/tmp/{META}", f"seedbox:/{META}") != 0:
+        print("  ** could not create the fixture on the remote; aborting")
+        sys.exit(1)
+    # The relay reads the remote through a FUSE mount with a 30s directory cache, so
+    # a file that exists remotely can still be invisible locally. Wait, don't race.
+    real = f"/srv/tree/seedbox/downloads/{META}"
+    for _ in range(40):
+        if subprocess.run(["docker", "exec", CONTAINER, "test", "-e", real]).returncode == 0:
+            return
+        time.sleep(1)
+    print("  ** fixture never appeared on the mount; aborting")
+    sys.exit(1)
+
+
+def drop_fixture():
+    _rclone("deletefile", f"seedbox:/{META}")
 
 
 def connect():
@@ -107,4 +148,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    make_fixture()
+    try:
+        main()
+    finally:
+        # Always, even on a failure: leaving it behind would show up in the app as
+        # a stray file on the remote.
+        drop_fixture()
