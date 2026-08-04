@@ -90,6 +90,11 @@ def _job_json(row):
     j["dest_dir"] = guards.to_virtual(row["dest_dir"])
     j["is_dir"] = bool(row["is_dir"])
     j["dest_preexisted"] = bool(row["dest_preexisted"])
+    # Virtual, never the container path. Still set on a DONE job means the old item
+    # was deliberately kept because the copy did not verify.
+    j["replace_path"] = (guards.to_virtual(row["replace_path"])
+                         if "replace_path" in row.keys() and row["replace_path"]
+                         else None)
     # Computed here, not client-side, so the two front ends cannot disagree --
     # and because rclone's own transferring[].percentage is an int that FLOORS
     # (see render.py: it reads 0 while 34MB of 86GB is done).
@@ -567,6 +572,23 @@ class Handler(BaseHTTPRequestHandler):
         src = guards.to_real(src_v)
         dest_dir = guards.to_real(dest_v)
         dest_name = body.get("dest_name") or os.path.basename(os.path.normpath(src))
+        # `replace`: an item to delete once this copy has landed AND verified.
+        # Validated HERE, at enqueue, through the same guard a direct delete uses --
+        # so a target outside a drop target, a volume root, or a seedbox path is
+        # refused before a hundred-gigabyte transfer rather than after it.
+        replace_real = None
+        if body.get("replace"):
+            replace_real = guards.to_real(body["replace"])
+            # NAS only, explicitly. validate_delete PERMITS seedbox paths now that
+            # the app can delete there, so it would happily accept a replace that
+            # removes the source -- which is a move, not a replace, and would break
+            # whatever torrent is seeding it. Caught in testing: the only thing that
+            # stopped it was the mount being read-only, which is luck, not a design.
+            if guards.under(replace_real, guards.SEEDBOX):
+                raise JobError("replace removes something on the NAS; "
+                               "it cannot target the seedbox")
+            replace_real = guards.validate_delete(replace_real)
+
         # The same gate the FTP path uses. Deliberately no breadcrumb file: that
         # exists only to paper over FileZilla's phantom move, and the app has real
         # job state, so writing one here would just litter the destination.
@@ -596,7 +618,8 @@ class Handler(BaseHTTPRequestHandler):
         elif policy == "rename":
             policy = "overwrite"
 
-        jid, created = self.jobs.enqueue(src, dest_dir, dest_name, on_conflict=policy)
+        jid, created = self.jobs.enqueue(src, dest_dir, dest_name, on_conflict=policy,
+                                         replace_path=replace_real)
         if not created:
             # 200, not 201: nothing was created. The app says so rather than
             # implying a second copy was queued.

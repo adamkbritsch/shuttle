@@ -84,6 +84,12 @@ struct FileTable: View {
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
+    /// NAS side only: arm this item to be replaced by something from the seedbox.
+    var onReplace: (Entry) -> Void = { _ in }
+    /// The name of the armed NAS item, when there is one. Seedbox side only: it is
+    /// what lets that pane offer "Replace <that>" on the item doing the replacing.
+    var replacingName: String? = nil
+    var onReplaceWith: (Entry) -> Void = { _ in }
     /// A row to scroll into view once it exists — how a picked search result is
     /// actually shown rather than merely selected.
     var reveal: String? = nil
@@ -311,6 +317,12 @@ struct FileTable: View {
                         onQueueRenamed(e, renamed)
                     }
                 }
+                // Only while something on the NAS is armed. Naming the target in
+                // the item is the point: it is the last chance to notice you are
+                // about to delete the wrong thing.
+                if let replacingName, items.count == 1, let e = items.first {
+                    Button("Replace “\(replacingName)”") { onReplaceWith(e) }
+                }
                 Divider()
             }
             if items.count == 1, let e = items.first, e.isDir {
@@ -337,6 +349,11 @@ struct FileTable: View {
                 }
                 if browse.mode == .destinations {
                     Button("New Folder…") { onNewFolder() }
+                    // One item only: replacing is a swap, and "replace these six
+                    // with that one" has no sensible meaning.
+                    if items.count == 1, let e = items.first {
+                        Button("Replace…") { onReplace(e) }
+                    }
                 }
                 Divider()
                 Button(items.count == 1

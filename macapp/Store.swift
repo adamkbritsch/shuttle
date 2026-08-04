@@ -283,10 +283,12 @@ final class RelayStore: ObservableObject {
     @discardableResult
     func send(src: String, destDir: String,
               onConflict: ConflictAction? = nil,
-              destName: String? = nil) async -> ConflictReport? {
+              destName: String? = nil,
+              replace: String? = nil) async -> ConflictReport? {
         var pending: ConflictReport?
         switch await api.enqueue(src: src, destDir: destDir,
-                                 onConflict: onConflict, destName: destName) {
+                                 onConflict: onConflict, destName: destName,
+                                 replace: replace) {
         case .ok(let msg): show(msg, isError: false)
         case .conflict(let report): pending = report
         case .refused(let why): show(why, isError: true)

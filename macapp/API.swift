@@ -232,10 +232,14 @@ actor RelayAPI {
     /// with the clashing files instead of silently overwriting them.
     func enqueue(src: String, destDir: String,
                  onConflict: ConflictAction? = nil,
-                 destName: String? = nil) async -> EnqueueResult {
+                 destName: String? = nil,
+                 replace: String? = nil) async -> EnqueueResult {
         var body: [String: String] = ["src": src, "dest_dir": destDir]
         if let onConflict { body["on_conflict"] = onConflict.rawValue }
         if let destName { body["dest_name"] = destName }
+        // The relay validates this at enqueue and only acts on it after the copy
+        // has landed AND verified, so a refusal arrives before any bytes move.
+        if let replace { body["replace"] = replace }
         guard let r = request("v1/jobs", method: "POST", body: body) else {
             return .unreachable("Bad base URL")
         }

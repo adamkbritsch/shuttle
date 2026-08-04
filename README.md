@@ -129,6 +129,12 @@ is no `rclone.conf` to maintain.
   Adding several things at once transfers them in name order, and the relay starts
   them in the order they were queued rather than whichever worker happened to wake
   first.
+- **Replace.** Right-click something on the NAS and choose Replace, then pick what
+  should take its place — either from that item's own right-click menu, which names
+  what it is replacing, or with the button in the send bar. The new copy transfers
+  first and the old item is deleted only once it has landed **and** been checked
+  against the source; if the copy fails or comes up short, both are kept. When both
+  sides share a name it is an overwrite in place and nothing is deleted afterwards.
 - **Retry** a failed transfer from the Failed tab: it re-queues the same source and
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would

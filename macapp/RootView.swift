@@ -36,6 +36,17 @@ struct RootView: View {
     @State private var activePane: BrowseStore.Mode = .seedbox
     /// The row a picked search result asked the table to show.
     @State private var revealPath: String?
+    /// A NAS item armed to be replaced. Deliberately NOT BrowseStore.selection —
+    /// navigation clears that and reload prunes it, and this has to survive the
+    /// user going off to find the source. It is the app's only state that outlives
+    /// a sheet, which is why SendBar shows it the whole time it is set.
+    @State private var replacing: Entry?
+    @State private var replaceStat: StatResult?
+    @State private var replaceSourceStat: StatResult?
+    /// The seedbox item that will do the replacing. Held explicitly because it can
+    /// come from a right-clicked row, which is not necessarily the selection.
+    @State private var replaceSource: Entry?
+    @State private var confirmingReplace: Bool = false
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -160,6 +171,14 @@ struct RootView: View {
                                    }
                                }
                            })
+        }
+        .sheet(isPresented: $confirmingReplace) {
+            if let target = replacing, let source = replaceSource {
+                ReplaceSheet(target: target, source: source,
+                             targetStat: replaceStat, sourceStat: replaceSourceStat,
+                             onCancel: { confirmingReplace = false },
+                             onConfirm: { confirmingReplace = false; sendReplacement() })
+            }
         }
         .sheet(item: $renaming) { entry in
             RenameSheet(entry: entry, name: $renameDraft,
@@ -363,7 +382,11 @@ struct RootView: View {
                                                     sources: seedbox.selectedEntries,
                                                     destination: dest.path,
                                                     enabled: canSend,
-                                                    action: trySend)
+                                                    action: trySend,
+                                                    replacing: replacing,
+                                                    replaceEnabled: canReplace,
+                                                    onReplace: confirmReplace,
+                                                    onCancelReplace: cancelReplace)
                                           }),
                        ])),
             SplitChild(SplitPaneSpec(min: Theme.queueMin,
@@ -408,6 +431,9 @@ struct RootView: View {
                                onNewFolder: { beginNewFolder(dest.path) },
                                onQueueRenamed: { e, name in enqueue([e], as: name) },
                                onBulkRename: { beginBulkRename($0, in: browse, tree: tree) },
+                               onReplace: { beginReplace($0) },
+                               replacingName: replacing?.name,
+                               onReplaceWith: { confirmReplace(with: $0) },
                                search: search,
                                searchActive: search.active,
                                onPickResult: { pickResult($0, in: browse, tree: tree) },
@@ -616,6 +642,63 @@ struct RootView: View {
             items: items,
             existingNames: Set(pane.entries.map(\.name)),
             truncated: pane.truncatedTotal != nil)
+    }
+
+    /// Arm a NAS item for replacement. Nothing is queued and nothing is deleted
+    /// here — this only says "the next thing you pick on the left replaces this".
+    private func beginReplace(_ entry: Entry) {
+        replacing = entry
+        replaceStat = nil
+        confirmingReplace = false
+        Task { replaceStat = await store.statFor(entry.path) }
+        store.show("Replacing \(entry.name) — pick one item on the left", isError: false)
+    }
+
+    private func cancelReplace() {
+        replacing = nil
+        replaceStat = nil
+        replaceSource = nil
+        replaceSourceStat = nil
+        confirmingReplace = false
+    }
+
+    /// Only one source, and only while something is armed.
+    private var canReplace: Bool {
+        replacing != nil && seedbox.selectedEntries.count == 1
+    }
+
+    private func confirmReplace() {
+        guard canReplace, let source = seedbox.selectedEntries.first else { return }
+        confirmReplace(with: source)
+    }
+
+    /// The seedbox pane's own "Replace X" menu item, which passes the row that was
+    /// right-clicked — not the selection, which may be something else entirely.
+    private func confirmReplace(with source: Entry) {
+        guard replacing != nil else { return }
+        replaceSource = source
+        replaceSourceStat = nil
+        confirmingReplace = true
+        Task { replaceSourceStat = await store.statFor(source.path) }
+    }
+
+    /// Queue the copy, carrying the "and then delete that" instruction with it.
+    ///
+    /// Not `enqueue(_:as:)`: that lands things in `dest.path`, and a replacement has
+    /// to land in the ARMED item's own folder, which may not be where the right pane
+    /// is pointed. `overwrite` because the default policy asks, and a replace has
+    /// already been confirmed once.
+    private func sendReplacement() {
+        guard let target = replacing, let source = replaceSource else { return }
+        let destDir = (target.path as NSString).deletingLastPathComponent
+        let oldPath = target.path
+        cancelReplace()
+        Task {
+            _ = await store.send(src: source.path, destDir: destDir,
+                                 onConflict: .overwrite, replace: oldPath)
+            tab = .queued
+            await dest.reload()
+        }
     }
 
     private func beginNewFolder(_ parent: String) {

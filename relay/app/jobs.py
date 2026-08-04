@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   error      TEXT,
   dest_preexisted INTEGER DEFAULT 0,
   rename_to  TEXT,
+  replace_path TEXT,
   on_conflict TEXT DEFAULT 'overwrite',
   created_at REAL, updated_at REAL, finished_at REAL
 );
@@ -156,6 +157,27 @@ class JobError(Exception):
     """Raised at enqueue time so the failure surfaces in FileZilla immediately."""
 
 
+def _count_tree(path):
+    """(files, bytes) under a path. Mirrors api._walk_count, duplicated here rather
+    than imported because api imports jobs and the cycle is not worth creating for
+    ten lines."""
+    files = 0
+    size = 0
+    if os.path.isfile(path):
+        try:
+            return 1, os.path.getsize(path)
+        except OSError:
+            return 0, 0
+    for root, _dirs, names in os.walk(path):
+        for n in names:
+            try:
+                size += os.path.getsize(os.path.join(root, n))
+                files += 1
+            except OSError:
+                pass
+    return files, size
+
+
 def _connect():
     con = sqlite3.connect(DB_PATH, timeout=15)
     con.row_factory = sqlite3.Row
@@ -178,6 +200,8 @@ class Jobs:
             con.execute("ALTER TABLE jobs ADD COLUMN rename_to TEXT")
         if "on_conflict" not in cols:
             con.execute("ALTER TABLE jobs ADD COLUMN on_conflict TEXT DEFAULT 'overwrite'")
+        if "replace_path" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN replace_path TEXT")
         # Anything left 'running' died with a previous container. Be honest that
         # rclone restarts an interrupted file from zero rather than resuming.
         n = con.execute(
@@ -227,7 +251,7 @@ class Jobs:
     # ---------- queue ----------
 
     def enqueue(self, src_real: str, dest_dir: str, dest_name: str,
-                on_conflict: str = "overwrite") -> tuple:
+                on_conflict: str = "overwrite", replace_path: str = None) -> tuple:
         """Returns (job_id, created). `created` is False when this exact copy was
         already queued or running, in which case the EXISTING job's id comes back
         and nothing new is added.
@@ -245,6 +269,13 @@ class Jobs:
         # adding it once.
         existing = self._active_duplicate(src_real, dest_dir, dest_name)
         if existing is not None:
+            # A replace carries an instruction the duplicate does not have. Job
+            # identity is (src, dest_dir, dest_name), so folding this into the
+            # existing job would silently drop the "and delete that" half of what
+            # was asked for -- worse than refusing.
+            if replace_path:
+                raise JobError(f"that copy is already queued as job {existing}; "
+                               "wait for it or cancel it before replacing with it")
             self.log(f"already queued as job {existing}: {dest_name} -> {dest_dir}")
             return existing, False
 
@@ -308,15 +339,19 @@ class Jobs:
                 (src_real, dest_dir, dest_name)).fetchone()
             if row:
                 con.commit()
+                if replace_path:
+                    raise JobError(f"that copy is already queued as job {row['id']}; "
+                                   "wait for it or cancel it before replacing with it")
                 self.log(f"already queued as job {row['id']}: {dest_name} -> {dest_dir}")
                 return row["id"], False
             cur = con.execute(
                 "INSERT INTO jobs (src_real,src_remote,dest_dir,dest_name,is_dir,"
-                "bytes_total,dest_preexisted,on_conflict,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "bytes_total,dest_preexisted,on_conflict,replace_path,created_at,"
+                "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (src_real, self.to_remote(src_real), dest_dir, dest_name,
                  int(is_dir), size, dest_preexisted,
-                 on_conflict if on_conflict in CONFLICT_FLAGS else "overwrite", now, now))
+                 on_conflict if on_conflict in CONFLICT_FLAGS else "overwrite",
+                 replace_path or None, now, now))
             jid = cur.lastrowid
             con.commit()
         finally:
@@ -415,8 +450,12 @@ class Jobs:
             except Exception as exc:
                 self.log(f"job {jid} terminate failed: {exc!r}")
 
+        # replace_path cleared here on purpose: `_run` returns before the rc check
+        # on a cancel, so nothing else would ever clear it, and a stale "delete
+        # that" instruction sitting on a cancelled job is not something to leave
+        # lying around. (rename_to has that exact bug today; it is merely harmless.)
         self._update(jid, state="cancelled", error="cancelled", speed=0, eta=0,
-                     finished_at=time.time())
+                     replace_path=None, finished_at=time.time())
         removed = self._cleanup_partial(job)
         self.log(f"job {jid} cancelled ({'running' if was_running else 'queued'})"
                  + (f"; removed partial {removed}" if removed else ""))
@@ -444,6 +483,65 @@ class Jobs:
         of being refused.
         """
         self._update(jid, rename_to=new_name)
+
+    def _apply_replace(self, jid: int) -> None:
+        """Delete the item this job was sent to replace -- but only once the new
+        copy is proven to have landed.
+
+        Runs ONLY in the success branch, and re-reads the row rather than trusting
+        the one captured when the job started, exactly as the deferred rename does.
+
+        The two checks in here are the whole point of the feature being safe:
+
+        1. If the replacement landed on the item it replaces -- same name on both
+           sides -- then the copy already overwrote it and there is nothing to
+           delete. Skipping that check would delete the file just written.
+
+        2. rclone exiting 0 is NOT proof. A directory copy once moved 1 of 3 files
+           with errors=0 and exit 0, which is the entire reason /verify exists. The
+           old item is about to be removed irreversibly, so the counts have to
+           agree first. On a mismatch NOTHING is deleted and `replace_path` is left
+           set -- a still-set replace_path on a done job IS the "the old item was
+           kept" signal, and needs no extra column.
+
+        Idempotent, because a relay restart re-runs the whole job and this fires
+        again on the second success: an already-deleted target is a no-op.
+        """
+        con = _connect()
+        job = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        con.close()
+        if job is None or not job["replace_path"]:
+            return
+        old_path = job["replace_path"]
+        dest = os.path.join(job["dest_dir"], job["dest_name"])
+
+        if os.path.normpath(old_path) == os.path.normpath(dest):
+            self._update(jid, replace_path=None)
+            self.log(f"job {jid} replaced {old_path} in place; nothing to delete")
+            return
+
+        if not os.path.exists(old_path):
+            self._update(jid, replace_path=None)
+            self.log(f"job {jid} replace target already gone: {old_path}")
+            return
+
+        src_files, src_bytes = _count_tree(job["src_real"])
+        new_files, new_bytes = _count_tree(dest)
+        if not new_files or src_files != new_files or src_bytes != new_bytes:
+            self.log(f"job {jid} replace SKIPPED: copy did not verify "
+                     f"(source {src_files} files/{src_bytes}B, "
+                     f"copy {new_files} files/{new_bytes}B); {old_path} kept")
+            return                      # replace_path stays set: the old item lives
+
+        try:
+            if os.path.isdir(old_path):
+                shutil.rmtree(old_path)
+            else:
+                os.remove(old_path)
+            self._update(jid, replace_path=None)
+            self.log(f"job {jid} replaced: deleted {old_path}")
+        except OSError as exc:
+            self.log(f"job {jid} replace delete failed: {exc!r}; {old_path} kept")
 
     def _apply_pending_rename(self, jid: int) -> None:
         """Apply a deferred rename. Only on success: after a failure or a cancel the
@@ -709,6 +807,8 @@ class Jobs:
         if rc == 0:
             # rclone has exited, so nothing holds the path any more.
             self._apply_pending_rename(jid)
+            # After the rename, so a replace compares against the final name.
+            self._apply_replace(jid)
             final = self._source_size(job["src_real"], bool(job["is_dir"]))
             self._update(jid, state="done", bytes_done=final or job["bytes_total"],
                          speed=0, eta=0, finished_at=time.time())
@@ -716,7 +816,7 @@ class Jobs:
         else:
             reason = self._last_error(logpath) or f"rclone exit {rc}"
             self._update(jid, state="failed", error=reason[:300],
-                         rename_to=None, finished_at=time.time())
+                         rename_to=None, replace_path=None, finished_at=time.time())
             self.log(f"job {jid} failed: {reason}")
 
     @staticmethod

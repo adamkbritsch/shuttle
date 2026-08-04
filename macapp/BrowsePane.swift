@@ -23,6 +23,9 @@ struct BrowsePane: View {
     var onNewFolder: () -> Void = { }
     var onQueueRenamed: (Entry, String) -> Void = { _, _ in }
     var onBulkRename: ([Entry]) -> Void = { _ in }
+    var onReplace: (Entry) -> Void = { _ in }
+    var replacingName: String? = nil
+    var onReplaceWith: (Entry) -> Void = { _ in }
     /// nil leaves this pane exactly as it was before search existed.
     var search: SearchStore? = nil
     /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
@@ -73,6 +76,9 @@ struct BrowsePane: View {
                           onNewFolder: onNewFolder,
                           onQueueRenamed: onQueueRenamed,
                           onBulkRename: onBulkRename,
+                          onReplace: onReplace,
+                          replacingName: replacingName,
+                          onReplaceWith: onReplaceWith,
                           reveal: reveal)
                 if let error = browse.error {
                     Text(error)
@@ -290,9 +296,43 @@ struct SendBar: View {
     let destination: String
     let enabled: Bool
     let action: () -> Void
+    /// A NAS item armed to be replaced. This is the app's only state that outlives
+    /// a sheet, so it MUST be visible: armed-and-invisible would be a trap, since
+    /// the next thing the user picks on the left decides what gets deleted.
+    var replacing: Entry? = nil
+    var replaceEnabled: Bool = false
+    var onReplace: () -> Void = { }
+    var onCancelReplace: () -> Void = { }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let replacing {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color(nsColor: .systemOrange))
+                    Text("Replacing")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(replacing.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    Text(sources.count == 1
+                         ? "— confirm below"
+                         : "— now pick one item on the left")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
+                    Button("Cancel", action: onCancelReplace)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.accent)
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+            }
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
@@ -310,15 +350,26 @@ struct SendBar: View {
                     }
                 }
                 Spacer()
-                Button(action: action) {
-                    Text("Send to NAS").font(.system(size: 12, weight: .medium))
+                if replacing != nil {
+                    // Red, and it says Replace: this button deletes something.
+                    Button(action: onReplace) {
+                        Text("Replace…").font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(nsColor: .systemRed))
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!replaceEnabled)
+                } else {
+                    Button(action: action) {
+                        Text("Send to NAS").font(.system(size: 12, weight: .medium))
+                    }
+                    // The one primary action in the window, so it carries the icon's
+                    // blue as a filled button rather than a bezelled default one.
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!enabled)
                 }
-                // The one primary action in the window, so it carries the icon's
-                // blue as a filled button rather than a bezelled default one.
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!enabled)
             }
             .padding(.horizontal, 10)
             .padding(.top, 8)

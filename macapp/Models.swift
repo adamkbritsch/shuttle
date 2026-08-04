@@ -106,6 +106,10 @@ struct Job: Decodable, Identifiable, Equatable {
     let filesTotal: Int
     let error: String?
     let destPreexisted: Bool
+    /// The item this job was sent to replace. Cleared by the relay once the old
+    /// item has actually been deleted, so STILL SET on a finished job means the
+    /// copy did not verify and both are still there.
+    let replacePath: String?
     let createdAt: Double?
     let updatedAt: Double?
     let finishedAt: Double?

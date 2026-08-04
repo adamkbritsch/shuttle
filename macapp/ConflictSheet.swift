@@ -498,3 +498,84 @@ struct BulkRenameSheet: View {
         return "\(plan.changedCount) of \(items.count) will change"
     }
 }
+
+/// Confirming a replace: what goes, what arrives, and when the old one dies.
+///
+/// Modelled on DeleteSheet, including the stat-gated confirm button — the stakes
+/// are a deletion, so the button stays disabled until the sizes are on screen and
+/// a reflexive Return cannot fire before they are.
+struct ReplaceSheet: View {
+    let target: Entry            // the NAS item being replaced
+    let source: Entry            // the seedbox item replacing it
+    let targetStat: StatResult?
+    let sourceStat: StatResult?
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    /// Same name on both sides means the copy lands ON the old item, so there is
+    /// nothing left to delete afterwards. Worth saying out loud, because "and the
+    /// old one is deleted" would be actively misleading here.
+    private var inPlace: Bool { target.name == source.name }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(inPlace ? "Replace in place?" : "Replace this item?")
+                .font(.system(size: 15, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 10) {
+                line("Replacing", target, targetStat, .secondary)
+                line("With", source, sourceStat, .primary)
+            }
+
+            Text(inPlace
+                 ? "Both are called “\(target.name)”, so the new copy overwrites it "
+                   + "where it stands. Nothing is deleted afterwards."
+                 : "The new copy is transferred first. “\(target.name)” is deleted "
+                   + "only once it has landed and been checked — if the copy fails "
+                   + "or comes up short, both are kept.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button(inPlace ? "Overwrite" : "Replace", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(nsColor: .systemRed))
+                    .disabled(targetStat == nil)
+            }
+        }
+        .padding(18)
+        .frame(width: 460)
+    }
+
+    private func line(_ label: String, _ entry: Entry,
+                      _ stat: StatResult?, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
+            HStack(spacing: 6) {
+                Image(systemName: entry.symbol)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(entry.isDir ? Theme.folderGold : Theme.fileGrey)
+                Text(entry.name)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(tint)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Text(detail(entry, stat))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head)
+        }
+    }
+
+    private func detail(_ entry: Entry, _ stat: StatResult?) -> String {
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        guard let stat else { return parent }
+        let what = stat.files == 1 ? "1 file" : "\(stat.files) files"
+        return "\(what) · \(humanBytes(stat.bytes))  —  \(parent)"
+    }
+}
