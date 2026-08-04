@@ -384,8 +384,6 @@ struct RootView: View {
                                                     enabled: canSend,
                                                     action: trySend,
                                                     replacing: replacing,
-                                                    replaceEnabled: canReplace,
-                                                    onReplace: confirmReplace,
                                                     onCancelReplace: cancelReplace)
                                           }),
                        ])),
@@ -651,7 +649,7 @@ struct RootView: View {
         replaceStat = nil
         confirmingReplace = false
         Task { replaceStat = await store.statFor(entry.path) }
-        store.show("Replacing \(entry.name) — pick one item on the left", isError: false)
+        store.show("Replacing \(entry.name) — right-click what should replace it", isError: false)
     }
 
     private func cancelReplace() {
@@ -662,18 +660,11 @@ struct RootView: View {
         confirmingReplace = false
     }
 
-    /// Only one source, and only while something is armed.
-    private var canReplace: Bool {
-        replacing != nil && seedbox.selectedEntries.count == 1
-    }
-
-    private func confirmReplace() {
-        guard canReplace, let source = seedbox.selectedEntries.first else { return }
-        confirmReplace(with: source)
-    }
-
-    /// The seedbox pane's own "Replace X" menu item, which passes the row that was
-    /// right-clicked — not the selection, which may be something else entirely.
+    /// The seedbox pane's "Replace X" menu item — the ONE way to perform a replace.
+    /// It passes the row that was right-clicked, not the selection, which may be
+    /// something else entirely. Deliberately not reachable from a button, a
+    /// double-click or a shortcut: the menu item names the item it would delete,
+    /// and that naming is the confirmation.
     private func confirmReplace(with source: Entry) {
         guard replacing != nil else { return }
         replaceSource = source

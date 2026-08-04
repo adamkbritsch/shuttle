@@ -296,12 +296,12 @@ struct SendBar: View {
     let destination: String
     let enabled: Bool
     let action: () -> Void
-    /// A NAS item armed to be replaced. This is the app's only state that outlives
-    /// a sheet, so it MUST be visible: armed-and-invisible would be a trap, since
-    /// the next thing the user picks on the left decides what gets deleted.
+    /// A NAS item armed to be replaced. Shown, never actioned from here: the ONLY
+    /// way to perform a replace is the seedbox item's own right-click menu, which
+    /// names what it would replace. This bar reports the armed state and offers a
+    /// way out of it, because state that outlives a sheet and is invisible would be
+    /// a trap.
     var replacing: Entry? = nil
-    var replaceEnabled: Bool = false
-    var onReplace: () -> Void = { }
     var onCancelReplace: () -> Void = { }
 
     var body: some View {
@@ -317,9 +317,7 @@ struct SendBar: View {
                     Text(replacing.name)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1).truncationMode(.middle)
-                    Text(sources.count == 1
-                         ? "— confirm below"
-                         : "— now pick one item on the left")
+                    Text("— right-click what should replace it, on the left")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -350,26 +348,15 @@ struct SendBar: View {
                     }
                 }
                 Spacer()
-                if replacing != nil {
-                    // Red, and it says Replace: this button deletes something.
-                    Button(action: onReplace) {
-                        Text("Replace…").font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color(nsColor: .systemRed))
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!replaceEnabled)
-                } else {
-                    Button(action: action) {
-                        Text("Send to NAS").font(.system(size: 12, weight: .medium))
-                    }
-                    // The one primary action in the window, so it carries the icon's
-                    // blue as a filled button rather than a bezelled default one.
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!enabled)
+                Button(action: action) {
+                    Text("Send to NAS").font(.system(size: 12, weight: .medium))
                 }
+                // The one primary action in the window, so it carries the icon's
+                // blue as a filled button rather than a bezelled default one.
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!enabled)
             }
             .padding(.horizontal, 10)
             .padding(.top, 8)
