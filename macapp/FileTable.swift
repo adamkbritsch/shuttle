@@ -351,15 +351,10 @@ struct FileTable: View {
                 }
                 if browse.mode == .destinations {
                     Button("New Folder…") { onNewFolder() }
-                    // Any number: filing six episodes into a folder is the case
-                    // this exists for. "Move to" rather than "create and place":
-                    // picking a folder that is already there is just as common,
-                    // and the sheet lists them.
-                    Button(items.count == 1
-                           ? "Move “\(items[0].name)” to Folder…"
-                           : "Move \(items.count) Items to Folder…") {
-                        onMoveToFolder(items)
-                    }
+                    // Just "Move": the sheet browses, so the destination is not
+                    // necessarily a folder here, and naming one in the menu item
+                    // would describe only the narrowest thing it does.
+                    Button("Move…") { onMoveToFolder(items) }
                     // One item only: replacing is a swap, and "replace these six
                     // with that one" has no sensible meaning.
                     if items.count == 1, let e = items.first {

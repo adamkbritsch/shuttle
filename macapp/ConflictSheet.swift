@@ -580,20 +580,28 @@ struct ReplaceSheet: View {
     }
 }
 
-/// Pick a folder to move things into — an existing one, or a new one.
+/// Pick where things go: browse to a folder, or make one.
 ///
-/// The list is the point. "Create a folder and put these in it" and "put these in
-/// that folder" are equally common when tidying, so the sheet offers both rather
-/// than making the second one a typing exercise where you have to remember the
-/// exact name.
+/// It navigates rather than only listing, because the useful destination is
+/// often NOT in the current directory — moving a file up so it sits beside the
+/// folder it was in is the obvious case, and a flat list of children cannot
+/// express it. Hence "Move Here", which targets whatever directory is on screen.
+///
+/// Bounded by the drop target: the relay refuses a move across volumes (os.rename
+/// would fail with EXDEV), so Up stops at the volume root rather than offering a
+/// destination that is guaranteed to be rejected.
 struct MoveToFolderSheet: View {
     let items: [Entry]
-    /// Sibling folders, already filtered by the caller: anything in the selection
-    /// is excluded, because a folder cannot be moved into itself.
+    /// The directory being browsed, and its folders. Both are owned by the caller
+    /// because loading them is an async listing.
+    let path: String
     let folders: [Entry]
+    let loading: Bool
+    /// Where the items are now — "Move Here" is pointless while browsing it.
+    let origin: String
     @Binding var newName: String
-    /// nil means "the new folder named above".
     @Binding var chosen: String?
+    let onNavigate: (String) -> Void
     let onCancel: () -> Void
     let onConfirm: () -> Void
 
@@ -601,53 +609,99 @@ struct MoveToFolderSheet: View {
 
     private var trimmed: String { newName.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// The same rules RenameSheet enforces. NewFolderSheet only checks for empty
-    /// and lets the relay refuse the rest, which costs a round trip to learn
-    /// something the client already knows.
+    /// The same rules RenameSheet enforces, rather than a round trip to find out.
     private var newNameValid: Bool {
         !trimmed.isEmpty && trimmed != "." && trimmed != ".."
             && !trimmed.contains("/")
     }
 
-    private var canConfirm: Bool { chosen != nil || newNameValid }
+    /// Up stops at the volume: /queue/MediaVolume3 is as far as a move can go.
+    private var parent: String? {
+        let up = (path as NSString).deletingLastPathComponent
+        guard up.hasPrefix("/queue/"), up != "/queue" else { return nil }
+        return up
+    }
 
-    /// Naming the clash before it happens, the way BulkRenameSheet does, rather
-    /// than letting the relay be the one to notice.
+    private var movingHere: Bool { chosen == nil && trimmed.isEmpty }
+    private var canConfirm: Bool {
+        if chosen != nil { return true }
+        if newNameValid { return true }
+        // "Move Here" is only an action somewhere else.
+        return path != origin
+    }
+
     private var joinsExisting: Bool {
-        chosen == nil && folders.contains { $0.name == trimmed }
+        chosen == nil && !trimmed.isEmpty && folders.contains { $0.name == trimmed }
+    }
+
+    private var confirmLabel: String {
+        if chosen != nil { return "Move" }
+        if newNameValid { return joinsExisting ? "Move" : "Create and Move" }
+        return "Move Here"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(items.count == 1
-                 ? "Move “\(items[0].name)” to a folder"
-                 : "Move \(items.count) items to a folder")
+                 ? "Move “\(items[0].name)”"
+                 : "Move \(items.count) items")
                 .font(.system(size: 15, weight: .semibold))
                 .lineLimit(1).truncationMode(.middle)
 
-            if !folders.isEmpty {
-                Text("Folders here")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(folders) { folder in
-                            row(folder.name, picked: chosen == folder.path) {
+            HStack(spacing: 7) {
+                Button {
+                    if let parent { onNavigate(parent) }
+                } label: {
+                    Image(systemName: "chevron.up").font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .disabled(parent == nil)
+                .foregroundStyle(parent == nil ? Color.secondary.opacity(0.4) : Theme.accent)
+                .help("Enclosing folder")
+                Text(path)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.head)
+                Spacer(minLength: 0)
+                if loading { ProgressView().controlSize(.small).scaleEffect(0.6) }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if folders.isEmpty && !loading {
+                        Text("No folders here")
+                            .font(.system(size: 11.5)).foregroundStyle(.tertiary)
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                    }
+                    ForEach(folders) { folder in
+                        HStack(spacing: 0) {
+                            pick(folder.name, picked: chosen == folder.path) {
                                 chosen = folder.path
                                 focused = false
                             }
+                            // Separate from selecting it: one says "put them in
+                            // there", the other says "look inside".
+                            Button { onNavigate(folder.path) } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.horizontal, 8).padding(.vertical, 5)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Look inside")
                         }
                     }
                 }
-                .frame(maxHeight: 168)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Theme.listFill))
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1))
             }
+            .frame(height: 164)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Theme.listFill))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1))
 
             VStack(alignment: .leading, spacing: 5) {
-                row("New folder", picked: chosen == nil) {
+                pick("New folder here", picked: chosen == nil && !trimmed.isEmpty) {
                     chosen = nil
                     focused = true
                 }
@@ -655,8 +709,6 @@ struct MoveToFolderSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .focused($focused)
                     .onSubmit { if canConfirm { onConfirm() } }
-                    // Typing is itself the choice: it would be perverse to type a
-                    // name and have the sheet still act on a highlighted row.
                     .onChange(of: newName) { _, _ in if !newName.isEmpty { chosen = nil } }
                     .padding(.leading, 20)
                 if joinsExisting {
@@ -665,13 +717,18 @@ struct MoveToFolderSheet: View {
                         .foregroundStyle(Color(nsColor: .systemOrange))
                         .padding(.leading, 20)
                 }
+                if movingHere && path == origin {
+                    Text("They are already here — browse elsewhere, or name a new folder.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 20)
+                }
             }
 
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
-                Button(chosen == nil && !joinsExisting ? "Create and Move" : "Move",
-                       action: onConfirm)
+                Button(confirmLabel, action: onConfirm)
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
                     .disabled(!canConfirm)
@@ -679,11 +736,11 @@ struct MoveToFolderSheet: View {
             }
         }
         .padding(18)
-        .frame(width: 460)
-        .onAppear { if folders.isEmpty { focused = true } }
+        .frame(width: 480)
     }
 
-    private func row(_ label: String, picked: Bool, action: @escaping () -> Void) -> some View {
+    private func pick(_ label: String, picked: Bool,
+                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Image(systemName: picked ? "largecircle.fill.circle" : "circle")

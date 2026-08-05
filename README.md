@@ -135,6 +135,12 @@ is no `rclone.conf` to maintain.
   first and the old item is deleted only once it has landed **and** been checked
   against the source; if the copy fails or comes up short, both are kept. When both
   sides share a name it is an overwrite in place and nothing is deleted afterwards.
+- **Move.** Right-click anything on the NAS and choose Move to open a small folder
+  browser: go up, look inside, pick a folder, or name a new one. Move Here targets
+  whatever folder you are looking at, which is how something moves *up* to sit
+  beside the folder it was in. It stays on one volume — a move across volumes is a
+  copy, and the app says so rather than failing halfway. A name clash asks whether
+  to replace or come in under a different name.
 - **Retry** a failed transfer from the Failed tab: it re-queues the same source and
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would

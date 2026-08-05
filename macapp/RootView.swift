@@ -53,6 +53,12 @@ struct RootView: View {
     @State private var moveFolderName = ""
     @State private var moveChosenFolder: String?
     @State private var showMoveSheet = false
+    /// The directory the move sheet is browsing, and its folders. Separate from the
+    /// pane: the useful destination is often somewhere else entirely.
+    @State private var movePickerPath = ""
+    @State private var movePickerFolders: [Entry] = []
+    @State private var movePickerLoading = false
+    @State private var movePickerGeneration = 0
     /// One item stuck on a name clash, with the rest parked behind it — the same
     /// shape as PendingConflict for sends.
     @State private var moveClash: PendingMoveClash?
@@ -192,9 +198,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $showMoveSheet) {
             MoveToFolderSheet(items: movingItems,
-                              folders: moveFolderChoices,
+                              path: movePickerPath,
+                              folders: movePickerFolders,
+                              loading: movePickerLoading,
+                              origin: (movingItems.first?.path as NSString?)?
+                                        .deletingLastPathComponent ?? "",
                               newName: $moveFolderName,
                               chosen: $moveChosenFolder,
+                              onNavigate: { loadMovePicker($0) },
                               onCancel: { showMoveSheet = false; movingItems = [] },
                               onConfirm: performMove)
         }
@@ -733,24 +744,46 @@ struct RootView: View {
         movingItems = items
         moveFolderName = ""
         moveChosenFolder = nil
+        movePickerFolders = []
         showMoveSheet = true
+        loadMovePicker(pane.path)
     }
 
-    /// Folders offered as destinations: this directory's own, minus anything in
-    /// the selection. A folder cannot be moved into itself, and offering it would
-    /// be offering to lose it.
-    private var moveFolderChoices: [Entry] {
+    /// List the folders in whatever directory the sheet is showing.
+    ///
+    /// Generation-counted like reload(): browsing is a few clicks a second and a
+    /// slow listing landing late would repopulate the list under a directory the
+    /// user has already left.
+    private func loadMovePicker(_ path: String) {
+        movePickerPath = path
+        moveChosenFolder = nil
+        movePickerGeneration &+= 1
+        let mine = movePickerGeneration
+        movePickerLoading = true
         let selected = Set(movingItems.map(\.path))
-        return actingPane.entries
-            .filter { $0.isDir && !selected.contains($0.path) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        Task {
+            let listing = await store.api.browse(path, limit: 5000)
+            guard mine == movePickerGeneration else { return }
+            movePickerLoading = false
+            guard case .listing(let l) = listing else {
+                movePickerFolders = []
+                return
+            }
+            // A folder cannot be moved into itself, so the selection never appears
+            // as a destination.
+            movePickerFolders = l.entries
+                .filter { $0.isDir && !selected.contains($0.path) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
     }
 
     /// Resolve the chosen folder — existing, or created — then move everything in.
     private func performMove() {
         let items = movingItems
         let pane = actingPane, tree = actingTree
-        let parent = pane.path
+        // The directory the sheet is SHOWING, which may be nowhere near the pane —
+        // that is the whole point of letting it navigate.
+        let parent = movePickerPath
         let picked = moveChosenFolder
         let typed = moveFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         movingItems = []
@@ -761,6 +794,10 @@ struct RootView: View {
             var folder: String
             if let picked {
                 folder = picked
+            } else if typed.isEmpty {
+                // "Move Here": the browsed directory itself. This is what lets an
+                // item move UP to sit beside the folder it was inside.
+                folder = parent
             } else {
                 guard let made = await store.folderFor(parent: parent, name: typed) else { return }
                 folder = made.path
@@ -808,11 +845,18 @@ struct RootView: View {
     private func finishMove(moved: Int, pane: BrowseStore, tree: TreeStore,
                             folder: String) async {
         guard moved > 0 else { return }
-        // Reveal the folder rather than just reloading: the items vanish from this
-        // listing, and pointing at where they went is the whole answer.
-        await pane.go(to: pane.path, revealing: folder)
-        revealPath = folder
-        tree.refresh(pane.path)
+        // Reveal where they went, but only when that is somewhere this pane can
+        // show. Moving into a folder elsewhere in the volume leaves the pane where
+        // it is and simply reloads, rather than yanking it somewhere unasked.
+        let here = pane.path
+        if (folder as NSString).deletingLastPathComponent == here {
+            await pane.go(to: here, revealing: folder)
+            revealPath = folder
+        } else {
+            await pane.reload()
+        }
+        tree.refresh(here)
+        tree.refresh(folder)
     }
 
     /// Answer a clash, then carry on with whatever was parked behind it.
