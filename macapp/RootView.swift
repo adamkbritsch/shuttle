@@ -46,7 +46,13 @@ struct RootView: View {
     /// The seedbox item that will do the replacing. Held explicitly because it can
     /// come from a right-clicked row, which is not necessarily the selection.
     @State private var replaceSource: Entry?
-    @State private var confirmingReplace: Bool = false
+    /// The confirm sheet's payload. A VALUE the presentation carries, not two
+    /// optionals the body re-reads: `.sheet(isPresented:)` wrapped around
+    /// `if let target = replacing, let source = replaceSource` renders EmptyView
+    /// the instant either is nil, and macOS presents EmptyView as a blank window
+    /// with nothing in it and no way out. Carrying the pair makes that state
+    /// unrepresentable, which is why every other sheet here uses `item:`.
+    @State private var pendingReplace: PendingReplace?
     /// A pending "move these into a folder". Holds the items and the pane, since
     /// the sheet lists that pane's own folders as choices.
     @State private var movingItems: [Entry] = []
@@ -66,7 +72,11 @@ struct RootView: View {
     /// Throttles the on-return reload, so alt-tabbing repeatedly is not a way to
     /// hammer the relay.
     @State private var lastAutoRefresh = Date.distantPast
-    @State private var newFolderParent: String?
+    /// The folder a new folder would be created in. Carried as a payload for the
+    /// same reason as `pendingReplace`: the sheet was reaching back for it with
+    /// `?? ""`, which cannot render blank but can render a sheet describing the
+    /// WRONG folder — and then create one there.
+    @State private var newFolderParent: FolderTarget?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
     @State private var selectedTransfer: Int?
@@ -176,12 +186,11 @@ struct RootView: View {
                                 }
                             })
         }
-        .sheet(isPresented: Binding(get: { newFolderParent != nil },
-                                    set: { if !$0 { newFolderParent = nil } })) {
-            NewFolderSheet(parent: newFolderParent ?? "", name: $newFolderName,
+        .sheet(item: $newFolderParent) { pending in
+            NewFolderSheet(parent: pending.path, name: $newFolderName,
                            onCancel: { newFolderParent = nil },
                            onConfirm: { name in
-                               let parent = newFolderParent ?? ""
+                               let parent = pending.path
                                newFolderParent = nil
                                Task {
                                    if await store.mkdir(parent: parent, name: name) {
@@ -191,13 +200,11 @@ struct RootView: View {
                                }
                            })
         }
-        .sheet(isPresented: $confirmingReplace) {
-            if let target = replacing, let source = replaceSource {
-                ReplaceSheet(target: target, source: source,
-                             targetStat: replaceStat, sourceStat: replaceSourceStat,
-                             onCancel: { confirmingReplace = false },
-                             onConfirm: { confirmingReplace = false; sendReplacement() })
-            }
+        .sheet(item: $pendingReplace) { pending in
+            ReplaceSheet(target: pending.target, source: pending.source,
+                         targetStat: replaceStat, sourceStat: replaceSourceStat,
+                         onCancel: { pendingReplace = nil },
+                         onConfirm: { pendingReplace = nil; sendReplacement(pending) })
         }
         .sheet(isPresented: $showMoveSheet) {
             MoveToFolderSheet(items: movingItems,
@@ -705,7 +712,9 @@ struct RootView: View {
     private func beginReplace(_ entry: Entry) {
         replacing = entry
         replaceStat = nil
-        confirmingReplace = false
+        replaceSource = nil
+        replaceSourceStat = nil
+        pendingReplace = nil
         Task { replaceStat = await store.statFor(entry.path) }
         store.show("Replacing \(entry.name) — right-click what should replace it", isError: false)
     }
@@ -715,7 +724,7 @@ struct RootView: View {
         replaceStat = nil
         replaceSource = nil
         replaceSourceStat = nil
-        confirmingReplace = false
+        pendingReplace = nil
     }
 
     /// The seedbox pane's "Replace X" menu item — the ONE way to perform a replace.
@@ -724,10 +733,12 @@ struct RootView: View {
     /// double-click or a shortcut: the menu item names the item it would delete,
     /// and that naming is the confirmation.
     private func confirmReplace(with source: Entry) {
-        guard replacing != nil else { return }
+        // Binds the target rather than asserting it is non-nil, so the pair that
+        // reaches the sheet is the pair that passed this check.
+        guard let target = replacing else { return }
         replaceSource = source
         replaceSourceStat = nil
-        confirmingReplace = true
+        pendingReplace = PendingReplace(target: target, source: source)
         Task { replaceSourceStat = await store.statFor(source.path) }
     }
 
@@ -737,13 +748,12 @@ struct RootView: View {
     /// to land in the ARMED item's own folder, which may not be where the right pane
     /// is pointed. `overwrite` because the default policy asks, and a replace has
     /// already been confirmed once.
-    private func sendReplacement() {
-        guard let target = replacing, let source = replaceSource else { return }
-        let destDir = (target.path as NSString).deletingLastPathComponent
-        let oldPath = target.path
+    private func sendReplacement(_ pending: PendingReplace) {
+        let destDir = (pending.target.path as NSString).deletingLastPathComponent
+        let oldPath = pending.target.path
         cancelReplace()
         Task {
-            _ = await store.send(src: source.path, destDir: destDir,
+            _ = await store.send(src: pending.source.path, destDir: destDir,
                                  onConflict: .overwrite, replace: oldPath)
             tab = .queued
             await dest.reload()
@@ -941,7 +951,7 @@ struct RootView: View {
     private var sheetIsOpen: Bool {
         deleting != nil || renaming != nil || conflict != nil || bulkRenaming != nil
             || showMoveSheet || moveClash != nil || newFolderParent != nil
-            || confirmingReplace || showSettings
+            || pendingReplace != nil || showSettings
     }
 
     /// Reload the destination pane when a transfer just landed something in the
@@ -968,7 +978,7 @@ struct RootView: View {
 
     private func beginNewFolder(_ parent: String) {
         newFolderName = ""
-        newFolderParent = parent
+        newFolderParent = FolderTarget(path: parent)
     }
 
     private func beginRename(_ entry: Entry, in pane: BrowseStore, tree: TreeStore) {
@@ -1405,6 +1415,25 @@ struct PendingConflict: Identifiable {
     let report: ConflictReport
     let remaining: [Entry]
     var id: String { src }
+}
+
+
+/// One confirmed replace: the armed NAS target and the seedbox item taking its
+/// place, together. Both are carried because the sheet names each of them and
+/// deletes one of them, and neither may be nil by the time it is on screen.
+/// A folder path a sheet is acting on. A bare `String?` cannot be a `.sheet(item:)`
+/// payload, and that is the whole reason the New Folder sheet was reaching back
+/// into @State instead of being handed its target.
+struct FolderTarget: Identifiable {
+    let path: String
+    var id: String { path }
+}
+
+
+struct PendingReplace: Identifiable {
+    let target: Entry
+    let source: Entry
+    var id: String { target.path + "\u{0000}" + source.path }
 }
 
 
