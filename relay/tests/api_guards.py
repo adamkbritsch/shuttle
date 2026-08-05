@@ -87,19 +87,38 @@ for pth, label, want in [("/../../etc", "browse traversal", 400),
 print("== search ==")
 # Ground truth measured directly on the volumes; these are the numbers that catch a
 # walk that silently stops early or starts skipping a root.
-for term, want_total in [("ted lasso", 2), ("reacher", 26), ("1080p", 7008)]:
-    # body_full only, no probe through call(): call()'s 20s timeout is right for
-    # the guard checks and too short for a COLD search, which measured 7.4s warm
-    # and past 25s cold. The probe added nothing but a spurious "http 0".
-    try:
-        got = json.loads(body_full("/v1/search?q=" + urllib.parse.quote(term)))["total"]
-    except Exception as exc:
-        got = f"error {exc}"
-    say(f"search {term!r} total", want_total, got)
+# Counted against a fixture we OWN, not against the live library. The previous
+# version asserted "1080p" == 7008 and duly failed the day a 1080p file was
+# deleted -- a real count, drifting for a real reason, reported as a bug. An
+# assertion pinned to mutable data is a false alarm generator.
+_PROBE = "zqshuttleprobe"
+subprocess.run(["docker", "exec", "seedbox-ftp-relay", "sh", "-c",
+                f"mkdir -p /srv/tree/queue/_scratch/sprobe && "
+                f"for i in 1 2 3; do : > /srv/tree/queue/_scratch/sprobe/{_PROBE}-$i.txt; done"],
+               capture_output=True)
+try:
+    d = json.loads(body_full("/v1/search?q=" + _PROBE))
+    say("search finds every fixture", 3, d["total"])
+    say("search returns them all", 3, len(d["entries"]))
+    say("search fixture paths correct", True,
+        all(e["name"].startswith(_PROBE) for e in d["entries"]))
+except Exception as exc:
+    say("search fixture", "ok", f"error {exc}")
+
+# The whole-library checks stay, but as RELATIONSHIPS rather than magic numbers:
+# these are what actually catch a walk that stops early or skips a root.
+# body_full only, no probe through call(): call()'s 20s timeout is right for the
+# guard checks and too short for a COLD search, measured past 25s.
+try:
+    d = json.loads(body_full("/v1/search?q=mkv&limit=500"))
+    say("search sees the library", True, d["total"] > 500, f"{d['total']} matches")
+    say("search caps at the limit", 500, len(d["entries"]))
+except Exception as exc:
+    say("search whole library", "ok", f"error {exc}")
 
 # The cap must not come from whichever volume sorts first. Before this was fixed a
 # 500-row search returned 500 rows from Media and none at all from MediaVolume3.
-d = json.loads(body_full("/v1/search?q=1080p&limit=500"))
+d = json.loads(body_full("/v1/search?q=mkv&limit=500"))
 vols = {e["path"].split("/")[2] for e in d["entries"]}
 say("search spans >1 volume", True, len(vols) > 1, str(sorted(vols)))
 say("search reports true total", True, d["total"] > len(d["entries"]), f"{len(d['entries'])} of {d['total']}")
@@ -164,6 +183,8 @@ _, msg = call("POST", "/v1/move", {"path": _SRC, "dest_dir": _MV, "new_name": "a
 say("slash cites the name", True, "single path component" in msg, msg.strip()[:52])
 subprocess.run(["docker", "exec", "seedbox-ftp-relay", "rm", "-f",
                 "/srv/tree/queue/_scratch/mvsrc.txt"], capture_output=True)
+subprocess.run(["docker", "exec", "seedbox-ftp-relay", "rm", "-rf",
+                "/srv/tree/queue/_scratch/sprobe"], capture_output=True)
 
 # mkdir stays strict by default and only joins when asked.
 code, _ = call("POST", "/v1/mkdir", {"parent": _MV, "name": "MoveTgt", "exist_ok": True})
