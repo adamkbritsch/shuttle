@@ -22,6 +22,12 @@ enum VerifyOutcome { case result(VerifyResult); case refused(String); case unrea
 /// case and NOT `.refused`: the user is typing, not doing something wrong, so it
 /// must be possible to keep the previous results on screen and say nothing.
 enum SearchOutcome { case results(SearchResults); case busy; case refused(String); case unauthorized; case unreachable(String) }
+/// `made` vs `joined`: the relay says whether it created the folder or found one
+/// already there, so the app can say which rather than implying it made one.
+enum MkdirOutcome { case made(String); case joined(String); case refused(String); case unreachable(String) }
+/// `clash` is the relay's 409, carrying the name that is taken so the app can ask
+/// overwrite-or-rename instead of just reporting a failure.
+enum MoveOutcome { case moved(String); case clash(name: String, existing: String); case refused(String); case unreachable(String) }
 
 actor RelayAPI {
     private let session: URLSession
@@ -193,6 +199,49 @@ actor RelayAPI {
                 return .refused("Could not read those results")
             }
             return .results(out)
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    /// Relocate one item inside a drop target. One call per item, like delete.
+    func move(_ path: String, into destDir: String,
+              newName: String? = nil, overwrite: Bool = false) async -> MoveOutcome {
+        var body: [String: String] = ["path": path, "dest_dir": destDir]
+        if let newName { body["new_name"] = newName }
+        if overwrite { body["overwrite"] = "1" }
+        guard let r = request("v1/move", method: "POST", body: body) else {
+            return .unreachable("Bad base URL")
+        }
+        do {
+            let (data, resp) = try await session.data(for: r)
+            guard let http = resp as? HTTPURLResponse else { return .unreachable("No response") }
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if http.statusCode == 409 {
+                return .clash(name: obj?["name"] as? String ?? "",
+                              existing: obj?["existing"] as? String ?? "")
+            }
+            if http.statusCode >= 400 {
+                return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
+            }
+            return .moved(obj?["moved"] as? String ?? destDir)
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    /// Unlike `mkdir`, this reads the response: "did you make it or join it?" is
+    /// the whole point when the caller is filing things into a folder.
+    func mkdirJoining(parent: String, name: String) async -> MkdirOutcome {
+        guard let r = request("v1/mkdir", method: "POST",
+                              body: ["parent": parent, "name": name, "exist_ok": "1"]) else {
+            return .unreachable("Bad base URL")
+        }
+        do {
+            let (data, resp) = try await session.data(for: r)
+            guard let http = resp as? HTTPURLResponse else { return .unreachable("No response") }
+            if http.statusCode >= 400 {
+                return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let path = obj?["path"] as? String ?? ""
+            return (obj?["created"] as? Bool ?? true) ? .made(path) : .joined(path)
         } catch { return .unreachable(RelayAPI.describe(error)) }
     }
 

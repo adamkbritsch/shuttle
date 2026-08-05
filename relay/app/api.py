@@ -282,10 +282,15 @@ class Handler(BaseHTTPRequestHandler):
             # one becomes a traceback in the container log on every close.
             pass
 
-    def _fail(self, code, msg):
+    def _fail(self, code, msg, extra=None):
         if code >= 400:
             self.log(f"api {code} {self.command} {self.path} :: {msg}")
-        self._send(code, {"error": msg})
+        body = {"error": msg}
+        # `extra` carries the facts a caller needs to ANSWER a refusal rather
+        # than merely report it -- the 409 from a move says which name is taken.
+        if extra:
+            body.update(extra)
+        self._send(code, body)
 
     def _authed(self):
         # compare_digest so a wrong token cannot be recovered a byte at a time
@@ -367,6 +372,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._rename()
             if path == "/v1/delete":
                 return self._delete()
+            if path == "/v1/move":
+                return self._move()
             if path == "/v1/mkdir":
                 return self._mkdir()
             if path == "/v1/settings":
@@ -711,10 +718,17 @@ class Handler(BaseHTTPRequestHandler):
         parent, name = body.get("parent"), (body.get("name") or "").strip()
         if not parent:
             raise JobError("parent is required")
-        dest = guards.validate_mkdir(guards.to_real(parent), name)
-        os.mkdir(dest)
-        self.log(f"created folder {guards.to_virtual(dest)}")
-        self._send(201, {"path": guards.to_virtual(dest)})
+        exist_ok = bool(body.get("exist_ok"))
+        dest = guards.validate_mkdir(guards.to_real(parent), name, exist_ok=exist_ok)
+        created = not os.path.isdir(dest)
+        if created:
+            os.mkdir(dest)
+            self.log(f"created folder {guards.to_virtual(dest)}")
+        # `created` is the honest answer to "did I make this or join it?", which
+        # is what lets the app say "using the existing folder" instead of
+        # implying it made one.
+        self._send(201 if created else 200,
+                   {"path": guards.to_virtual(dest), "created": created})
 
     def _retry(self, jid):
         """Queue a fresh job with the same source and destination as a finished one."""
@@ -866,6 +880,63 @@ class Handler(BaseHTTPRequestHandler):
         self.log(f"renamed on the seedbox: {guards.to_virtual(src)} -> {new_name}")
         self._send(200, {"deferred": False, "path": guards.to_virtual(dest),
                          "name": new_name, "seedbox": True})
+
+    def _move(self):
+        """Relocate something within one drop target.
+
+        The FTP front end has always been able to do this (vfs.rename step 3);
+        the HTTP API could not, because _rename is pinned to the same parent by
+        two separate locks. Same guard shape as _delete otherwise: refuse while a
+        transfer is touching either end, and answer 409 rather than guessing when
+        the destination name is taken.
+        """
+        body = self._body()
+        virtual, dest_virtual = body.get("path"), body.get("dest_dir")
+        if not virtual or not dest_virtual:
+            raise JobError("path and dest_dir are required")
+        new_name = (body.get("new_name") or "").strip()
+        src, dest = guards.validate_move(guards.to_real(virtual),
+                                         guards.to_real(dest_virtual), new_name)
+
+        # Either end. A job writing INTO the source would lose its progress, and
+        # one writing into the destination would be overwritten from under it.
+        for row in self.jobs.snapshot("queued", "running"):
+            target = os.path.join(row["dest_dir"], row["dest_name"])
+            for path in (src, dest):
+                if (target == path or guards.under(target, path)
+                        or guards.under(path, target)):
+                    raise JobError(
+                        f"job {row['id']} is still transferring into "
+                        f"{guards.to_virtual(target)} -- cancel it first")
+
+        if os.path.exists(dest):
+            if not body.get("overwrite"):
+                # 409, not 400: this refusal can actually be ANSWERED, so it
+                # carries the name and the app asks overwrite-or-rename. Same
+                # shape as the enqueue conflict.
+                return self._fail(409,
+                                  f"{os.path.basename(dest)} already exists there",
+                                  extra={"name": os.path.basename(dest),
+                                         "existing": guards.to_virtual(dest)})
+            # Explicitly asked for, having been shown the clash. os.rename would
+            # replace a file silently but REFUSES a non-empty directory, so the
+            # destination is removed first either way.
+            try:
+                if os.path.isdir(dest):
+                    shutil.rmtree(dest)
+                else:
+                    os.remove(dest)
+            except OSError as exc:
+                raise JobError(f"could not replace {os.path.basename(dest)}: "
+                               f"{exc.strerror or exc!r}")
+        try:
+            os.rename(src, dest)
+        except OSError as exc:
+            # Same drop target by construction, so EXDEV should be unreachable --
+            # report whatever actually happened rather than assuming.
+            raise JobError(f"move failed: {exc.strerror or exc!r}")
+        self.log(f"moved {guards.to_virtual(src)} -> {guards.to_virtual(dest)}")
+        self._send(200, {"moved": guards.to_virtual(dest)})
 
     def _payload(self, limit):
         return {"active": [_job_json(r) for r in self.jobs.snapshot("queued", "running")],

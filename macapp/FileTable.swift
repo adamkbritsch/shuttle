@@ -90,6 +90,8 @@ struct FileTable: View {
     /// what lets that pane offer "Replace <that>" on the item doing the replacing.
     var replacingName: String? = nil
     var onReplaceWith: (Entry) -> Void = { _ in }
+    /// NAS side only: move these into a folder here, existing or new.
+    var onMoveToFolder: ([Entry]) -> Void = { _ in }
     /// A row to scroll into view once it exists — how a picked search result is
     /// actually shown rather than merely selected.
     var reveal: String? = nil
@@ -349,6 +351,15 @@ struct FileTable: View {
                 }
                 if browse.mode == .destinations {
                     Button("New Folder…") { onNewFolder() }
+                    // Any number: filing six episodes into a folder is the case
+                    // this exists for. "Move to" rather than "create and place":
+                    // picking a folder that is already there is just as common,
+                    // and the sheet lists them.
+                    Button(items.count == 1
+                           ? "Move “\(items[0].name)” to Folder…"
+                           : "Move \(items.count) Items to Folder…") {
+                        onMoveToFolder(items)
+                    }
                     // One item only: replacing is a swap, and "replace these six
                     // with that one" has no sensible meaning.
                     if items.count == 1, let e = items.first {

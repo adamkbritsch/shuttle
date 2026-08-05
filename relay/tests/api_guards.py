@@ -137,6 +137,47 @@ say("seedbox search scoped", True,
     all(e["path"].startswith("/seedbox/") for e in sb["entries"]),
     f"{len(sb['entries'])} results")
 
+print("== move ==")
+# Every one of these must be refused, and refused BEFORE anything is relocated.
+# The same-volume rule is the load-bearing one: os.rename across two drop targets
+# fails with EXDEV, which is the whole reason this relay exists.
+_MV = "/queue/_scratch"
+# A REAL source, because validate_move checks existence BEFORE the same-volume and
+# name rules. Probing with a path that does not exist still returns 400, so those
+# assertions would go green having tested nothing but the existence check.
+subprocess.run(["docker", "exec", "seedbox-ftp-relay", "sh", "-c",
+                "echo mv > /srv/tree/queue/_scratch/mvsrc.txt"], capture_output=True)
+_SRC = _MV + "/mvsrc.txt"
+for body, label in [
+        ({"path": "/seedbox/downloads/OpenVPN", "dest_dir": _MV}, "move from the seedbox"),
+        ({"path": _SRC, "dest_dir": "/seedbox/downloads"}, "move to the seedbox"),
+        ({"path": _MV, "dest_dir": _MV}, "move a whole volume"),
+        ({"path": _SRC, "dest_dir": "/queue/Media"}, "move across volumes"),
+        ({"path": _SRC, "dest_dir": _MV, "new_name": "a/b"}, "slash in new_name"),
+        ({"path": _MV + "/nope", "dest_dir": _MV}, "move a missing item")]:
+    code, resp = call("POST", "/v1/move", body)
+    say(label, 400, code, resp.strip()[:62])
+# ...and the messages must be the INTENDED ones, not "no such item" wearing a 400.
+_, msg = call("POST", "/v1/move", {"path": _SRC, "dest_dir": "/queue/Media"})
+say("cross-volume cites the volume", True, "same volume" in msg, msg.strip()[:52])
+_, msg = call("POST", "/v1/move", {"path": _SRC, "dest_dir": _MV, "new_name": "a/b"})
+say("slash cites the name", True, "single path component" in msg, msg.strip()[:52])
+subprocess.run(["docker", "exec", "seedbox-ftp-relay", "rm", "-f",
+                "/srv/tree/queue/_scratch/mvsrc.txt"], capture_output=True)
+
+# mkdir stays strict by default and only joins when asked.
+code, _ = call("POST", "/v1/mkdir", {"parent": _MV, "name": "MoveTgt", "exist_ok": True})
+say("mkdir exist_ok creates", 201, code)
+code, body = call("POST", "/v1/mkdir", {"parent": _MV, "name": "MoveTgt", "exist_ok": True})
+say("mkdir exist_ok joins", 200, code, body.strip()[:56])
+code, body = call("POST", "/v1/mkdir", {"parent": _MV, "name": "MoveTgt"})
+say("mkdir strict still refuses", 400, code, body.strip()[:44])
+# A folder must never be moved inside itself -- it would simply be lost.
+code, body = call("POST", "/v1/move", {"path": _MV + "/MoveTgt", "dest_dir": _MV + "/MoveTgt"})
+say("folder into itself refused", 400, code, body.strip()[:56])
+r = subprocess.run(["docker", "exec", "seedbox-ftp-relay", "rm", "-rf",
+                    "/srv/tree/queue/_scratch/MoveTgt"])
+
 print("== nothing was created ==")
 for chk in ["/srv/tree/queue/_scratch/Movis", "/srv/tree/queue/_active/OpenVPN"]:
     r = subprocess.run(["docker", "exec", "seedbox-ftp-relay", "test", "-e", chk])

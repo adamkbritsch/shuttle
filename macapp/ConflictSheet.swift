@@ -579,3 +579,176 @@ struct ReplaceSheet: View {
         return "\(what) · \(humanBytes(stat.bytes))  —  \(parent)"
     }
 }
+
+/// Pick a folder to move things into — an existing one, or a new one.
+///
+/// The list is the point. "Create a folder and put these in it" and "put these in
+/// that folder" are equally common when tidying, so the sheet offers both rather
+/// than making the second one a typing exercise where you have to remember the
+/// exact name.
+struct MoveToFolderSheet: View {
+    let items: [Entry]
+    /// Sibling folders, already filtered by the caller: anything in the selection
+    /// is excluded, because a folder cannot be moved into itself.
+    let folders: [Entry]
+    @Binding var newName: String
+    /// nil means "the new folder named above".
+    @Binding var chosen: String?
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    @FocusState private var focused: Bool
+
+    private var trimmed: String { newName.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The same rules RenameSheet enforces. NewFolderSheet only checks for empty
+    /// and lets the relay refuse the rest, which costs a round trip to learn
+    /// something the client already knows.
+    private var newNameValid: Bool {
+        !trimmed.isEmpty && trimmed != "." && trimmed != ".."
+            && !trimmed.contains("/")
+    }
+
+    private var canConfirm: Bool { chosen != nil || newNameValid }
+
+    /// Naming the clash before it happens, the way BulkRenameSheet does, rather
+    /// than letting the relay be the one to notice.
+    private var joinsExisting: Bool {
+        chosen == nil && folders.contains { $0.name == trimmed }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(items.count == 1
+                 ? "Move “\(items[0].name)” to a folder"
+                 : "Move \(items.count) items to a folder")
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1).truncationMode(.middle)
+
+            if !folders.isEmpty {
+                Text("Folders here")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(folders) { folder in
+                            row(folder.name, picked: chosen == folder.path) {
+                                chosen = folder.path
+                                focused = false
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 168)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.listFill))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                row("New folder", picked: chosen == nil) {
+                    chosen = nil
+                    focused = true
+                }
+                TextField("Folder name", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit { if canConfirm { onConfirm() } }
+                    // Typing is itself the choice: it would be perverse to type a
+                    // name and have the sheet still act on a highlighted row.
+                    .onChange(of: newName) { _, _ in if !newName.isEmpty { chosen = nil } }
+                    .padding(.leading, 20)
+                if joinsExisting {
+                    Text("That folder already exists — these will be added to it.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Color(nsColor: .systemOrange))
+                        .padding(.leading, 20)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button(chosen == nil && !joinsExisting ? "Create and Move" : "Move",
+                       action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(!canConfirm)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 460)
+        .onAppear { if folders.isEmpty { focused = true } }
+    }
+
+    private func row(_ label: String, picked: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: picked ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(picked ? Theme.accent : Color.secondary.opacity(0.6))
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.folderGold)
+                Text(label)
+                    .font(.system(size: 12))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One item could not move because the name is taken. Two answers only.
+///
+/// Deliberately NOT the full ConflictAction set: overwrite_newer, overwrite_size
+/// and the rest are rclone flags for a TRANSFER. A local move is one rename with
+/// no gradations, so offering them would describe behaviour that does not exist.
+struct MoveClashSheet: View {
+    let name: String
+    let folder: String
+    @Binding var rename: String
+    let onCancel: () -> Void
+    let onOverwrite: () -> Void
+    let onRename: () -> Void
+
+    private var trimmed: String { rename.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var renameValid: Bool {
+        !trimmed.isEmpty && trimmed != name && trimmed != "." && trimmed != ".."
+            && !trimmed.contains("/")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("“\(name)” is already in that folder")
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(2)
+            Text(folder)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head)
+
+            TextField("Move it in as…", text: $rename)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { if renameValid { onRename() } }
+
+            HStack {
+                Button("Replace", action: onOverwrite)
+                    .tint(Color(nsColor: .systemRed))
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Move In As…", action: onRename)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(!renameValid)
+            }
+        }
+        .padding(18)
+        .frame(width: 440)
+    }
+}

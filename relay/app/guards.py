@@ -216,7 +216,58 @@ def validate_delete(path: str, require_exists: bool = True) -> str:
     return src
 
 
-def validate_mkdir(parent: str, name: str) -> str:
+def validate_move(src: str, dest_dir: str, new_name: str = ""):
+    """Gate for relocating something WITHIN one drop target. -> (src, dest)
+
+    This is the one operation the HTTP API never had, even though the FTP front
+    end has always done it: vfs.rename's step 3 is a plain os.rename once both
+    sides are inside the same drop target. So this exposes a proven operation
+    rather than inventing one -- and the checks below are what keep it proven.
+
+    The same-drop-target rule is the load-bearing one. Each target is its own
+    bind mount, so a move inside one is a metadata operation of constant cost
+    regardless of size, and EXDEV cannot arise. Across two, os.rename fails with
+    EXDEV -- which is the whole reason this relay exists at all -- so it is
+    refused here rather than discovered at the syscall.
+    """
+    src = os.path.normpath(src)
+    dest_dir = os.path.normpath(dest_dir)
+
+    # Neither end may be the seedbox: it is mounted read-only, and this is a
+    # local rename, not an rclone operation.
+    if under(src, SEEDBOX) or under(dest_dir, SEEDBOX):
+        raise JobError("the seedbox is read-only -- move things on the NAS side")
+
+    target = resolve_drop_target(src)
+    if target is None:
+        raise JobError(f"{to_virtual(src)} is not somewhere this can move from")
+    if src in drop_targets():
+        raise JobError("that is a whole volume, not something inside one")
+    if not os.path.exists(src):
+        raise JobError(f"no such item: {to_virtual(src)}")
+
+    if resolve_drop_target(dest_dir) != target:
+        raise JobError("a move has to stay on the same volume -- "
+                       "send it across instead")
+    if not os.path.isdir(dest_dir):
+        raise JobError(f"no such folder: {to_virtual(dest_dir)}")
+
+    name = new_name or os.path.basename(src)
+    if (name in _BAD_NAME or "/" in name or any(ord(c) < 32 for c in name)):
+        raise JobError("the name must be a single path component")
+
+    dest = os.path.join(dest_dir, name)
+    # A directory cannot swallow itself. Reachable here in a way it never is for
+    # a rename: ask to file "Reacher (2022)" into a new folder of the same name
+    # and, without this, the folder would be moved inside itself and lost.
+    if dest_dir == src or under(dest_dir, src):
+        raise JobError(f"cannot move {to_virtual(src)} inside itself")
+    if dest == src:
+        raise JobError("that is already where it is")
+    return src, dest
+
+
+def validate_mkdir(parent: str, name: str, exist_ok: bool = False) -> str:
     """Gate for creating a folder on the NAS. The parent MAY be a volume root --
     making a folder inside a volume is the normal case; renaming or deleting one
     is not."""
@@ -232,7 +283,10 @@ def validate_mkdir(parent: str, name: str) -> str:
         raise JobError("the folder name must be a single path component")
 
     dest = os.path.join(par, name)
-    if os.path.exists(dest):
+    # exist_ok is opt-in so the default stays strict: New Folder should still say
+    # so rather than silently doing nothing. "Place inside" passes it, because
+    # filing things into a folder that already exists is the point there.
+    if os.path.exists(dest) and not (exist_ok and os.path.isdir(dest)):
         raise JobError(f"{name} already exists here")
     return dest
 

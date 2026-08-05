@@ -47,6 +47,16 @@ struct RootView: View {
     /// come from a right-clicked row, which is not necessarily the selection.
     @State private var replaceSource: Entry?
     @State private var confirmingReplace: Bool = false
+    /// A pending "move these into a folder". Holds the items and the pane, since
+    /// the sheet lists that pane's own folders as choices.
+    @State private var movingItems: [Entry] = []
+    @State private var moveFolderName = ""
+    @State private var moveChosenFolder: String?
+    @State private var showMoveSheet = false
+    /// One item stuck on a name clash, with the rest parked behind it — the same
+    /// shape as PendingConflict for sends.
+    @State private var moveClash: PendingMoveClash?
+    @State private var moveClashName = ""
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -179,6 +189,21 @@ struct RootView: View {
                              onCancel: { confirmingReplace = false },
                              onConfirm: { confirmingReplace = false; sendReplacement() })
             }
+        }
+        .sheet(isPresented: $showMoveSheet) {
+            MoveToFolderSheet(items: movingItems,
+                              folders: moveFolderChoices,
+                              newName: $moveFolderName,
+                              chosen: $moveChosenFolder,
+                              onCancel: { showMoveSheet = false; movingItems = [] },
+                              onConfirm: performMove)
+        }
+        .sheet(item: $moveClash) { clash in
+            MoveClashSheet(name: clash.name, folder: clash.folder,
+                           rename: $moveClashName,
+                           onCancel: { moveClash = nil },
+                           onOverwrite: { resolveMoveClash(overwrite: true) },
+                           onRename: { resolveMoveClash(overwrite: false) })
         }
         .sheet(item: $renaming) { entry in
             RenameSheet(entry: entry, name: $renameDraft,
@@ -432,6 +457,7 @@ struct RootView: View {
                                onReplace: { beginReplace($0) },
                                replacingName: replacing?.name,
                                onReplaceWith: { confirmReplace(with: $0) },
+                               onMoveToFolder: { beginMoveToFolder($0, in: browse, tree: tree) },
                                search: search,
                                searchActive: search.active,
                                onPickResult: { pickResult($0, in: browse, tree: tree) },
@@ -698,6 +724,110 @@ struct RootView: View {
                                  onConflict: .overwrite, replace: oldPath)
             tab = .queued
             await dest.reload()
+        }
+    }
+
+    private func beginMoveToFolder(_ items: [Entry], in pane: BrowseStore, tree: TreeStore) {
+        guard !items.isEmpty else { return }
+        actionPane = pane; actionTree = tree
+        movingItems = items
+        moveFolderName = ""
+        moveChosenFolder = nil
+        showMoveSheet = true
+    }
+
+    /// Folders offered as destinations: this directory's own, minus anything in
+    /// the selection. A folder cannot be moved into itself, and offering it would
+    /// be offering to lose it.
+    private var moveFolderChoices: [Entry] {
+        let selected = Set(movingItems.map(\.path))
+        return actingPane.entries
+            .filter { $0.isDir && !selected.contains($0.path) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Resolve the chosen folder — existing, or created — then move everything in.
+    private func performMove() {
+        let items = movingItems
+        let pane = actingPane, tree = actingTree
+        let parent = pane.path
+        let picked = moveChosenFolder
+        let typed = moveFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        movingItems = []
+        showMoveSheet = false
+        guard !items.isEmpty else { return }
+
+        Task {
+            var folder: String
+            if let picked {
+                folder = picked
+            } else {
+                guard let made = await store.folderFor(parent: parent, name: typed) else { return }
+                folder = made.path
+                if !made.created {
+                    store.show("Using the folder “\(typed)” that was already here",
+                               isError: false)
+                }
+            }
+            await moveEach(items, into: folder, pane: pane, tree: tree)
+        }
+    }
+
+    /// Sequential, like the delete loop: one clear refusal beats several racing
+    /// ones, and a clash has to be answered before the rest continue.
+    private func moveEach(_ items: [Entry], into folder: String,
+                          pane: BrowseStore, tree: TreeStore) async {
+        var moved = 0
+        for (i, item) in items.enumerated() {
+            switch await store.api.move(item.path, into: folder) {
+            case .moved:
+                moved += 1
+            case .clash(let name, let existing):
+                // Park the remainder behind the sheet, exactly as a send conflict
+                // parks the rest of a selection.
+                moveClashName = name
+                moveClash = PendingMoveClash(item: item, folder: folder, name: name,
+                                             existing: existing,
+                                             remaining: Array(items.dropFirst(i + 1)),
+                                             movedSoFar: moved)
+                await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+                return
+            case .refused(let why):
+                store.show(why, isError: true)
+                await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+                return
+            case .unreachable(let why):
+                store.show(why, isError: true)
+                return
+            }
+        }
+        store.show(moved == 1 ? "Moved 1 item" : "Moved \(moved) items", isError: false)
+        await finishMove(moved: moved, pane: pane, tree: tree, folder: folder)
+    }
+
+    private func finishMove(moved: Int, pane: BrowseStore, tree: TreeStore,
+                            folder: String) async {
+        guard moved > 0 else { return }
+        // Reveal the folder rather than just reloading: the items vanish from this
+        // listing, and pointing at where they went is the whole answer.
+        await pane.go(to: pane.path, revealing: folder)
+        revealPath = folder
+        tree.refresh(pane.path)
+    }
+
+    /// Answer a clash, then carry on with whatever was parked behind it.
+    private func resolveMoveClash(overwrite: Bool) {
+        guard let clash = moveClash else { return }
+        let newName = moveClashName.trimmingCharacters(in: .whitespacesAndNewlines)
+        moveClash = nil
+        let pane = actingPane, tree = actingTree
+        Task {
+            let outcome = await store.api.move(clash.item.path, into: clash.folder,
+                                               newName: overwrite ? nil : newName,
+                                               overwrite: overwrite)
+            if case .refused(let why) = outcome { store.show(why, isError: true) }
+            if case .unreachable(let why) = outcome { store.show(why, isError: true) }
+            await moveEach(clash.remaining, into: clash.folder, pane: pane, tree: tree)
         }
     }
 
@@ -1170,4 +1300,17 @@ private struct MenuBridge: ViewModifier {
                 onFind()
             }
     }
+}
+
+
+/// One item that could not move because its name is taken there, with the rest of
+/// the selection parked behind it.
+struct PendingMoveClash: Identifiable {
+    let item: Entry
+    let folder: String
+    let name: String
+    let existing: String
+    let remaining: [Entry]
+    let movedSoFar: Int
+    var id: String { item.path }
 }

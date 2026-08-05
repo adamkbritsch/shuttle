@@ -309,6 +309,17 @@ final class RelayStore: ObservableObject {
 
     /// True when it actually went, so the caller knows whether to reload a listing.
     func delete(_ path: String) async -> Bool { await write(await api.delete(path)) }
+    /// -> the folder's path, and whether it had to be created. Nil means refused;
+    /// the message has already been shown.
+    func folderFor(parent: String, name: String) async -> (path: String, created: Bool)? {
+        switch await api.mkdirJoining(parent: parent, name: name) {
+        case .made(let p):   return (p, true)
+        case .joined(let p): return (p, false)
+        case .refused(let why): show(why, isError: true); return nil
+        case .unreachable(let why): show(why, isError: true); return nil
+        }
+    }
+
     func mkdir(parent: String, name: String) async -> Bool {
         await write(await api.mkdir(parent: parent, name: name))
     }

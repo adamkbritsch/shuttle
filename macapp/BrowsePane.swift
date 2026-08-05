@@ -26,6 +26,7 @@ struct BrowsePane: View {
     var onReplace: (Entry) -> Void = { _ in }
     var replacingName: String? = nil
     var onReplaceWith: (Entry) -> Void = { _ in }
+    var onMoveToFolder: ([Entry]) -> Void = { _ in }
     /// nil leaves this pane exactly as it was before search existed.
     var search: SearchStore? = nil
     /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
@@ -79,6 +80,7 @@ struct BrowsePane: View {
                           onReplace: onReplace,
                           replacingName: replacingName,
                           onReplaceWith: onReplaceWith,
+                          onMoveToFolder: onMoveToFolder,
                           reveal: reveal)
                 if let error = browse.error {
                     Text(error)
