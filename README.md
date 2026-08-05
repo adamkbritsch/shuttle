@@ -114,7 +114,10 @@ is no `rclone.conf` to maintain.
   newer, overwrite if size differs, overwrite if size differs or newer, rename, or
   skip. Each maps to the rclone flag that implements it.
 - **Deferred rename.** Rename something mid-transfer and it is applied when the
-  copy finishes — surviving both a closed laptop and a relay restart.
+  copy finishes — surviving both a closed laptop and a relay restart. Renaming
+  something on the remote server uses the same mechanism in reverse: it starts the
+  transfer and names the copy on arrival, leaving the source untouched, because the
+  filename is what the thing serving it tracks.
 - **Housekeeping on either side** — rename and delete from the right-click menu,
   on the NAS and on the remote server alike; new folders on the NAS side. A landing
   folder can be tidied and a badly named release corrected at the source, without

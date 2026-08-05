@@ -232,20 +232,6 @@ def _run(cmd: list, timeout: int):
     return p.stdout
 
 
-def move(rel_from: str, rel_to: str, timeout: int = 120) -> None:
-    """Rename in place on the seedbox.
-
-    The mount this relay reads through is bound READ-ONLY at two layers, so this
-    cannot go through the filesystem -- it has to be rclone talking to the remote.
-
-    `moveto` and not copy-then-delete: the FTP backend reports Move and DirMove as
-    supported (checked with `rclone backend features`), so the server renames in
-    place and a 100GB release costs the same as a small one. If that ever stopped
-    being true, rclone would silently fall back to copying the whole directory.
-    """
-    _run(["rclone", "moveto", remote_path(rel_from), remote_path(rel_to)], timeout)
-
-
 def delete(rel: str, is_dir: bool, timeout: int = 600) -> None:
     """Remove a file or a whole directory from the seedbox.
 

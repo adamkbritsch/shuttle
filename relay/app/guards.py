@@ -301,19 +301,13 @@ def validate_rename(path: str, new_name: str, require_exists: bool = True):
     src = os.path.normpath(path)
 
     if under(src, SEEDBOX):
-        # Renaming on the seedbox IS allowed, via rclone against the remote rather
-        # than the read-only mount. Same depth rule as delete, and the same caveat
-        # about the torrent that is seeding it.
-        _reject_shallow_seedbox(src, "rename")
-        if require_exists and not os.path.exists(src):
-            raise JobError(f"no such item: {to_virtual(src)}")
-        if (new_name in _BAD_NAME or "/" in new_name
-                or any(ord(c) < 32 for c in new_name)):
-            raise JobError("the new name must be a single path component")
-        dest = os.path.join(os.path.dirname(src), new_name)
-        if os.path.exists(dest):
-            raise JobError(f"{new_name} already exists here")
-        return src, dest
+        # Refused again, deliberately. Renaming on the seedbox worked, but every
+        # use of it broke the torrent still seeding those files -- the name is
+        # what the client tracks. The app now gets the same OUTCOME without that
+        # cost: it starts the transfer and defers the rename to the copy, so the
+        # new name exists on the NAS and the seedbox is left exactly as it was.
+        raise JobError("the seedbox is read-only -- transfer it and rename the "
+                       "copy; renaming here would break what is seeding it")
     if resolve_drop_target(src) is None:
         raise JobError(f"{to_virtual(src)} is not somewhere this can rename")
     # The drop-target ROOTS are the media volumes themselves; renaming one would

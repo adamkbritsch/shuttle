@@ -218,10 +218,16 @@ struct RootView: View {
         }
         .sheet(item: $renaming) { entry in
             RenameSheet(entry: entry, name: $renameDraft,
+                        arriving: renamingIsSeedbox ? dest.path : nil,
                         onCancel: { renaming = nil },
                         onConfirm: { newName in
                             let path = entry.path
+                            let seedbox = renamingIsSeedbox
                             renaming = nil
+                            if seedbox {
+                                downloadAndRename(entry, to: newName)
+                                return
+                            }
                             Task {
                                 let didRename = await store.rename(path: path, newName: newName)
                                 // A deferred rename changes nothing on disk yet, so
@@ -875,6 +881,55 @@ struct RootView: View {
         }
     }
 
+    /// True while the open rename sheet belongs to the seedbox pane, where rename
+    /// means something completely different.
+    private var renamingIsSeedbox: Bool { actionPane?.mode == .seedbox }
+
+    /// Rename a seedbox item by transferring it and renaming the COPY.
+    ///
+    /// The seedbox is never touched. Renaming there did work, but the name is what
+    /// the torrent client tracks, so every use of it broke whatever was seeding
+    /// the file — a high price for a cosmetic change to a source you do not keep.
+    ///
+    /// Nothing new is invented here: it enqueues the copy, then issues an ordinary
+    /// rename against the destination path. The relay sees a queued job writing
+    /// there and records the rename against it (`defer_rename`), applying it the
+    /// moment rclone exits. That is the same mechanism as renaming something
+    /// mid-transfer, which is exactly what this is.
+    ///
+    /// The race resolves itself either way: if the copy has already finished, the
+    /// relay finds no active job and simply renames the file that is now on disk.
+    private func downloadAndRename(_ entry: Entry, to newName: String) {
+        guard dest.path != "/queue", dest.path.hasPrefix("/queue/") else {
+            store.show("Pick a destination folder first — /queue itself is the list of volumes",
+                       isError: true)
+            return
+        }
+        let destDir = dest.path
+        let landed = destDir + "/" + entry.name
+        Task {
+            let report = await store.send(src: entry.path, destDir: destDir)
+            if let report {
+                // Let the ordinary conflict flow handle it; the rename would be
+                // meaningless until the copy is settled.
+                conflict = PendingConflict(src: entry.path, destDir: destDir,
+                                           report: report, remaining: [])
+                return
+            }
+            switch await store.api.rename(path: landed, newName: newName) {
+            case .deferred:
+                store.show("Will arrive as “\(newName)”", isError: false)
+            case .renamed:
+                store.show("Renamed to “\(newName)”", isError: false)
+                await dest.reload()
+            case .refused(let why):   store.show(why, isError: true)
+            case .unauthorized:       store.show("Token rejected", isError: true)
+            case .unreachable(let why): store.show(why, isError: true)
+            }
+            tab = .queued
+        }
+    }
+
     private func beginNewFolder(_ parent: String) {
         newFolderName = ""
         newFolderParent = parent
@@ -1239,6 +1294,10 @@ private struct SettingsSheet: View {
 private struct RenameSheet: View {
     let entry: Entry
     @Binding var name: String
+    /// Non-nil on the seedbox side: the folder the copy will land in. Renaming a
+    /// seedbox item does not rename it there, and the sheet has to say so — the
+    /// menu item alone would imply the opposite.
+    var arriving: String? = nil
     let onCancel: () -> Void
     let onConfirm: (String) -> Void
 
@@ -1250,9 +1309,22 @@ private struct RenameSheet: View {
             && !trimmed.contains("/") && trimmed != entry.name
     }
 
+    /// The seedbox wording is not decoration. "Rename" on a source you do not own
+    /// implies the source changes, and it does not — saying where the copy lands
+    /// is the only way the sheet is honest about what the button does.
+    private var explanation: String {
+        if let arriving {
+            return "Nothing on the seedbox changes. This transfers it to \(arriving) "
+                 + "and names the copy when the download finishes."
+        }
+        return "If a transfer is still writing here, the rename is applied the moment "
+             + "it finishes — it will not interrupt the download or lose its place."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Rename").font(.system(size: 15, weight: .semibold))
+            Text(arriving == nil ? "Rename" : "Rename on arrival")
+                .font(.system(size: 15, weight: .semibold))
             Text(entry.path)
                 .font(.system(size: 10.5, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -1266,8 +1338,7 @@ private struct RenameSheet: View {
                 .onSubmit { if valid { onConfirm(trimmed) } }
                 .padding(.top, 14)
 
-            Text("If a transfer is still writing here, the rename is applied the moment "
-                 + "it finishes — it will not interrupt the download or lose its place.")
+            Text(explanation)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1276,7 +1347,9 @@ private struct RenameSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
-                Button("Rename") { onConfirm(trimmed) }
+                Button(arriving == nil ? "Rename" : "Download and Rename") {
+                    onConfirm(trimmed)
+                }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!valid)
             }

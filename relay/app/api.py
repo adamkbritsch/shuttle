@@ -779,9 +779,6 @@ class Handler(BaseHTTPRequestHandler):
         src, dest = guards.validate_rename(guards.to_real(virtual), new_name,
                                            require_exists=False)
 
-        if guards.under(src, guards.SEEDBOX):
-            return self._rename_seedbox(src, dest, new_name)
-
         # If a transfer is still writing into this path (or into something under
         # it), renaming now would pull the directory out from under rclone and lose
         # the transfer's progress. Record it against that job instead; the worker
@@ -857,86 +854,6 @@ class Handler(BaseHTTPRequestHandler):
                  f"({files} files, {size} bytes)")
         self._send(200, {"deleted": guards.to_virtual(src),
                          "files": files, "bytes": size, "seedbox": True})
-
-    def _rename_seedbox(self, src, dest, new_name):
-        """Rename on the seedbox, over rclone rather than the read-only mount.
-
-        Never deferred: deferral exists for a DESTINATION that rclone is still
-        writing, where the rename can be applied afterwards. A source being read
-        cannot be renamed later to any useful effect, so this refuses instead.
-        """
-        import jobs as jobsmod
-        self._seedbox_in_use(src)
-        if not os.path.exists(src):
-            raise JobError(f"no such item: {guards.to_virtual(src)}")
-        rel_from = jobsmod._src_rel(src)
-        rel_to = jobsmod._src_rel(dest)
-        if rel_from is None or rel_to is None:
-            raise JobError(f"{guards.to_virtual(src)} is not on the seedbox remote")
-        try:
-            seedbox.move(rel_from, rel_to)
-        except seedbox.SeedboxError as exc:
-            raise JobError(str(exc))
-        self.log(f"renamed on the seedbox: {guards.to_virtual(src)} -> {new_name}")
-        self._send(200, {"deferred": False, "path": guards.to_virtual(dest),
-                         "name": new_name, "seedbox": True})
-
-    def _move(self):
-        """Relocate something within one drop target.
-
-        The FTP front end has always been able to do this (vfs.rename step 3);
-        the HTTP API could not, because _rename is pinned to the same parent by
-        two separate locks. Same guard shape as _delete otherwise: refuse while a
-        transfer is touching either end, and answer 409 rather than guessing when
-        the destination name is taken.
-        """
-        body = self._body()
-        virtual, dest_virtual = body.get("path"), body.get("dest_dir")
-        if not virtual or not dest_virtual:
-            raise JobError("path and dest_dir are required")
-        new_name = (body.get("new_name") or "").strip()
-        src, dest = guards.validate_move(guards.to_real(virtual),
-                                         guards.to_real(dest_virtual), new_name)
-
-        # Either end. A job writing INTO the source would lose its progress, and
-        # one writing into the destination would be overwritten from under it.
-        for row in self.jobs.snapshot("queued", "running"):
-            target = os.path.join(row["dest_dir"], row["dest_name"])
-            for path in (src, dest):
-                if (target == path or guards.under(target, path)
-                        or guards.under(path, target)):
-                    raise JobError(
-                        f"job {row['id']} is still transferring into "
-                        f"{guards.to_virtual(target)} -- cancel it first")
-
-        if os.path.exists(dest):
-            if not body.get("overwrite"):
-                # 409, not 400: this refusal can actually be ANSWERED, so it
-                # carries the name and the app asks overwrite-or-rename. Same
-                # shape as the enqueue conflict.
-                return self._fail(409,
-                                  f"{os.path.basename(dest)} already exists there",
-                                  extra={"name": os.path.basename(dest),
-                                         "existing": guards.to_virtual(dest)})
-            # Explicitly asked for, having been shown the clash. os.rename would
-            # replace a file silently but REFUSES a non-empty directory, so the
-            # destination is removed first either way.
-            try:
-                if os.path.isdir(dest):
-                    shutil.rmtree(dest)
-                else:
-                    os.remove(dest)
-            except OSError as exc:
-                raise JobError(f"could not replace {os.path.basename(dest)}: "
-                               f"{exc.strerror or exc!r}")
-        try:
-            os.rename(src, dest)
-        except OSError as exc:
-            # Same drop target by construction, so EXDEV should be unreachable --
-            # report whatever actually happened rather than assuming.
-            raise JobError(f"move failed: {exc.strerror or exc!r}")
-        self.log(f"moved {guards.to_virtual(src)} -> {guards.to_virtual(dest)}")
-        self._send(200, {"moved": guards.to_virtual(dest)})
 
     def _payload(self, limit):
         return {"active": [_job_json(r) for r in self.jobs.snapshot("queued", "running")],
