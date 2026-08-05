@@ -7,6 +7,13 @@ struct Toast: Equatable {
 }
 
 /// Connection state + the transfer list.
+/// One "a transfer just landed" signal. See `RelayStore.landedIn` for why it is
+/// not simply the list of folders.
+struct Landing: Equatable {
+    var seq = 0
+    var dirs: [String] = []
+}
+
 @MainActor
 final class RelayStore: ObservableObject {
     enum Reason: Equatable { case unauthorized; case unreachable(String) }
@@ -28,6 +35,15 @@ final class RelayStore: ObservableObject {
             Task { await api.setBase(baseURL) }
         }
     }
+
+    /// Destination folders a transfer has just finished writing into. The panes
+    /// watch this and reload only if they are showing one of them.
+    ///
+    /// Carries a sequence number because SwiftUI compares by VALUE: two transfers
+    /// finishing into the same folder — the ordinary case, a season of episodes —
+    /// would publish an identical array, and the second landing would silently
+    /// never refresh anything.
+    @Published private(set) var landedIn = Landing()
 
     private var timer: Timer?
     private var nextPollAt = Date.distantPast
@@ -262,6 +278,20 @@ final class RelayStore: ObservableObject {
             // churn and SwiftUI does not rebuild the list every second.
             break
         case .page(let p):
+            // A job that was active and no longer is has just landed something on
+            // disk. That is a FACT the app already knows, a second before the user
+            // would think to press refresh — so publish it and let the panes react.
+            // Signal-driven, not a timer: a timer would either be too slow to be
+            // useful or refresh constantly for nothing.
+            let wasActive = Set(active.map(\.id))
+            let stillActive = Set(p.active.map(\.id))
+            let finished = p.recent.filter {
+                wasActive.contains($0.id) && !stillActive.contains($0.id)
+            }
+            if !finished.isEmpty {
+                landedIn = Landing(seq: landedIn.seq &+ 1,
+                                   dirs: finished.map(\.destDir))
+            }
             // `active` is deliberately NOT filtered: a transfer that was already
             // running when the app started is still running now and must be visible.
             if p.active != active { active = p.active }

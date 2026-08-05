@@ -144,6 +144,13 @@ is no `rclone.conf` to maintain.
   beside the folder it was in. It stays on one volume — a move across volumes is a
   copy, and the app says so rather than failing halfway. A name clash asks whether
   to replace or come in under a different name.
+- **Listings refresh themselves** when there is a reason to. A finished transfer
+  reloads the destination pane if that is the folder you are looking at, so the
+  file appears where you are watching for it rather than after a manual refresh.
+  Coming back to the window reloads the NAS side if it has been sitting a while.
+  Both are skipped while a dialog is open, and neither touches the remote side:
+  that listing costs an FTP round trip, so it is refreshed when you ask and not
+  on a timer.
 - **Retry** a failed transfer from the Failed tab: it re-queues the same source and
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would

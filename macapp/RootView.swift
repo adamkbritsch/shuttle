@@ -63,6 +63,9 @@ struct RootView: View {
     /// shape as PendingConflict for sends.
     @State private var moveClash: PendingMoveClash?
     @State private var moveClashName = ""
+    /// Throttles the on-return reload, so alt-tabbing repeatedly is not a way to
+    /// hammer the relay.
+    @State private var lastAutoRefresh = Date.distantPast
     @State private var newFolderParent: String?
     @State private var newFolderName = ""
     /// Which transfer ⌘⌫ cancels.
@@ -257,7 +260,10 @@ struct RootView: View {
                              sourceSelection: seedbox.selection, sourcePath: seedbox.path,
                              destSelection: dest.selection, destPath: dest.path,
                              activePane: $activePane,
-                             onFind: { (activePane == .seedbox ? sourceSearch : search).active = true }))
+                             onFind: { (activePane == .seedbox ? sourceSearch : search).active = true },
+                             landed: store.landedIn,
+                             onLanded: { refreshIfShowing($0.dirs) },
+                             onre: { refreshOnReturn() }))
         .onReceive(NotificationCenter.default.publisher(for: .shuttleRefresh)) { _ in
             Task { await refreshAll() }
         }
@@ -930,6 +936,36 @@ struct RootView: View {
         }
     }
 
+    /// A sheet is open, so the ground must not move under it: every pending action
+    /// holds paths that a reload could invalidate mid-decision.
+    private var sheetIsOpen: Bool {
+        deleting != nil || renaming != nil || conflict != nil || bulkRenaming != nil
+            || showMoveSheet || moveClash != nil || newFolderParent != nil
+            || confirmingReplace || showSettings
+    }
+
+    /// Reload the destination pane when a transfer just landed something in the
+    /// folder it is showing. Exact match only: a folder further up gains no row
+    /// from this, so reloading it would be churn for an identical listing.
+    private func refreshIfShowing(_ dirs: [String]) {
+        guard !sheetIsOpen, !dirs.isEmpty else { return }
+        let here = dest.path
+        guard dirs.contains(where: { $0 == here }) else { return }
+        Task { await dest.reload(); destTree.refresh(here) }
+    }
+
+    /// Returning to the app. Only the NAS side, and only if it has been a while:
+    /// that side is a local walk and costs nothing, whereas the seedbox is rclone
+    /// over FTP where a cold listing runs past a second and would make every
+    /// window switch feel slow.
+    private func refreshOnReturn() {
+        guard !sheetIsOpen, store.active.isEmpty else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAutoRefresh) > 20 else { return }
+        lastAutoRefresh = now
+        Task { await dest.reload() }
+    }
+
     private func beginNewFolder(_ parent: String) {
         newFolderName = ""
         newFolderParent = parent
@@ -1403,6 +1439,9 @@ private struct MenuBridge: ViewModifier {
     let destPath: String
     @Binding var activePane: BrowseStore.Mode
     let onFind: () -> Void
+    let landed: Landing
+    let onLanded: (Landing) -> Void
+    let onre: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -1416,6 +1455,11 @@ private struct MenuBridge: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .shuttleFind)) { _ in
                 onFind()
             }
+            .onChange(of: landed) { _, dirs in onLanded(dirs) }
+            // Coming back to the window is the other moment the listing is likely
+            // stale — something may have changed it while you were elsewhere.
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification)) { _ in onre() }
     }
 }
 
