@@ -144,6 +144,25 @@ is no `rclone.conf` to maintain.
   beside the folder it was in. It stays on one volume — a move across volumes is a
   copy, and the app says so rather than failing halfway. A name clash asks whether
   to replace or come in under a different name.
+- **The destination can be this Mac.** A picker in the destination pane's header
+  switches it between the NAS and the machine you are sitting at, browsing
+  anywhere on it. With the Mac selected the SOURCE pane grows its own picker, so
+  either the remote server or the NAS can feed it — that picker is hidden the rest
+  of the time, because with the NAS on both sides it would only offer to move
+  something to where it already is.
+
+  Bytes still come through the relay: it reads the file and streams it, so nothing
+  is staged on the NAS's disk and no server credentials live on the Mac. That is
+  not the slower path it sounds like — the remote-to-NAS and remote-to-Mac legs
+  share the same uplink, while NAS-to-Mac is local, so a streamed two-hop transfer
+  runs at the speed of the leg that was always the bottleneck.
+
+  Two honest differences from a NAS transfer. **It stops if you quit Shuttle** —
+  the relay's queue survives a restart because it runs on the NAS, and this one
+  cannot; every local row says so. And **Delete on the Mac goes to the Trash**
+  rather than being final, which is what stands in for the depth guard the relay
+  applies to its own volumes. Search on the Mac side is Spotlight, so it answers
+  in milliseconds instead of walking from `/`.
 - **Listings refresh themselves** when there is a reason to. A finished transfer
   reloads the destination pane if that is the folder you are looking at, so the
   file appears where you are watching for it rather than after a manual refresh.

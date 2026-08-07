@@ -3,6 +3,10 @@ import SwiftUI
 /// The bottom pane: what is transferring now, and what recently finished.
 struct TransfersPane: View {
     @ObservedObject var store: RelayStore
+    /// Transfers onto this Mac, shown in the same three tabs. Merged rather than
+    /// given their own pane: they are the same activity, and splitting them would
+    /// mean looking in two places to answer "is it done yet?".
+    @ObservedObject var local: LocalTransfers
     @Binding var tab: Tab
     /// The row ⌘⌫ acts on. Nil means nothing is selected and the shortcut
     /// deliberately does nothing.
@@ -22,13 +26,7 @@ struct TransfersPane: View {
     @State private var verifyResult: VerifyResult?
     @State private var verifyBusy = false
 
-    private func count(_ t: Tab) -> Int {
-        switch t {
-        case .queued: return store.active.count
-        case .failed: return store.recent.filter { $0.kind == .failed || $0.kind == .cancelled }.count
-        case .done: return store.recent.filter { $0.kind == .done }.count
-        }
-    }
+    private func count(_ t: Tab) -> Int { rows(for: t).count }
 
     /// Extracted from the ForEach body on purpose: with all seven closures inline
     /// the expression exceeded the type-checker's budget and the build failed with
@@ -36,21 +34,43 @@ struct TransfersPane: View {
     @ViewBuilder
     private func row(_ job: Job) -> some View {
         JobRow(job: job,
-               onCancel: { Task { await store.cancel(job.id) } },
-               onDismiss: { Task { await store.dismiss(job.id) } },
-               onRetry: { Task { _ = await store.retry(job.id) } },
+               onCancel: {
+                   if job.isLocal { local.cancel(job.id) }
+                   else { Task { await store.cancel(job.id) } }
+               },
+               onDismiss: {
+                   if job.isLocal { local.dismiss(job.id) }
+                   else { Task { await store.dismiss(job.id) } }
+               },
+               onRetry: {
+                   if job.isLocal { local.retry(job.id) }
+                   else { Task { _ = await store.retry(job.id) } }
+               },
                isSelected: tab == .queued && selected == job.id,
                onSelect: { selected = job.id },
                onLog: { openLog(job) },
                onVerify: { openVerify(job) })
     }
 
-    private var rows: [Job] {
-        switch tab {
-        case .queued: return store.active
-        case .failed: return store.recent.filter { $0.kind == .failed || $0.kind == .cancelled }
-        case .done: return store.recent.filter { $0.kind == .done }
+    private var rows: [Job] { rows(for: tab) }
+
+    /// Newest first across both engines, so a Mac transfer and a NAS one queued
+    /// seconds apart appear in the order they were started rather than grouped by
+    /// which engine happens to own them.
+    private func rows(for t: Tab) -> [Job] {
+        let mine = local.jobs.map(Job.init)
+        let merged: [Job]
+        switch t {
+        case .queued:
+            merged = store.active + mine.filter(\.isActive)
+        case .failed:
+            merged = store.recent.filter { $0.kind == .failed || $0.kind == .cancelled }
+                + mine.filter { $0.kind == .failed || $0.kind == .cancelled }
+        case .done:
+            merged = store.recent.filter { $0.kind == .done } + mine.filter { $0.kind == .done }
         }
+        if t == .queued { return merged.sorted { ($0.createdAt ?? 0) < ($1.createdAt ?? 0) } }
+        return merged.sorted { ($0.finishedAt ?? 0) > ($1.finishedAt ?? 0) }
     }
 
     var body: some View {
@@ -226,14 +246,16 @@ private struct JobRow: View {
                 if job.isActive {
                     ChromeButton(symbol: "xmark.circle", help: "Stop this transfer", action: onCancel)
                 }
-                if job.kind == .done {
+                if job.kind == .done, !job.isLocal {
                     ChromeButton(symbol: "checkmark.seal", help: "Verify file counts", action: onVerify)
                 }
                 if job.kind == .failed {
                     ChromeButton(symbol: "arrow.clockwise",
                                  help: "Queue this transfer again", action: onRetry)
                 }
-                ChromeButton(symbol: "doc.text", help: "Open the rclone log", action: onLog)
+                if !job.isLocal {
+                    ChromeButton(symbol: "doc.text", help: "Open the rclone log", action: onLog)
+                }
                 if !job.isActive {
                     ChromeButton(symbol: "eye.slash", help: "Clear from this list", action: onDismiss)
                 }
@@ -249,10 +271,16 @@ private struct JobRow: View {
                 Button("Stop Transfer", action: onCancel)
                 Divider()
             }
-            if job.kind == .done {
+            // Both are relay-job concepts: a transfer this app performed itself has
+            // no rclone log, and nothing on the relay to verify against. Hidden
+            // rather than disabled — a button that can never work should not be
+            // there at all.
+            if job.kind == .done, !job.isLocal {
                 Button("Verify File Counts", action: onVerify)
             }
-            Button("Open rclone Log", action: onLog)
+            if !job.isLocal {
+                Button("Open rclone Log", action: onLog)
+            }
             Divider()
             Button("Copy Source Path") { copyText(job.src) }
             Button("Copy Destination Path") { copyText(job.destPath) }

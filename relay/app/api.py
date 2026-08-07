@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import re
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -76,6 +77,10 @@ _browse_slots = threading.BoundedSemaphore(8)
 # directory tree fail. 2, because the only real concurrency is an abandoned search
 # still draining while its replacement starts.
 _search_slots = threading.BoundedSemaphore(2)
+# Downloads to a Mac. Capped low for the same reason as searches: each seedbox
+# fetch holds an FTP connection open for the whole transfer, and the seedbox has
+# far fewer of those than this relay has threads.
+_fetch_slots = threading.BoundedSemaphore(4)
 
 _JOB_RE = re.compile(r"^/v1/jobs/(\d+)(?:/(cancel|dismiss|log|verify|retry))?$")
 
@@ -344,6 +349,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, seedbox.public())
             if path == "/v1/stat":
                 return self._stat()
+            if path == "/v1/manifest":
+                return self._manifest()
+            if path == "/v1/fetch":
+                return self._fetch()
             if path == "/v1/jobs":
                 return self._jobs()
             m = _JOB_RE.match(path)
@@ -674,6 +683,232 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"path": guards.to_virtual(real),
                          "is_dir": os.path.isdir(real),
                          "files": files, "bytes": size})
+
+    # ---------- reading bytes out, for a destination this relay cannot write to ----------
+
+    def _seedbox_rel(self, real):
+        """The remote-relative path for a /seedbox/... real path, or None if it is
+        not one. Mirrors the arithmetic `_browse` does."""
+        norm = os.path.normpath(real)
+        if not guards.under(norm, guards.SEEDBOX):
+            return None
+        alias_root = os.path.join(guards.SEEDBOX, seedbox.ROOT_ALIAS)
+        if not guards.under(norm, alias_root):
+            raise JobError(f"no such folder: {guards.to_virtual(real)}")
+        rel = os.path.relpath(norm, alias_root)
+        return "" if rel == "." else rel
+
+    def _manifest(self):
+        """A path flattened to the files it contains, with sizes.
+
+        The Mac needs this because it fetches one file at a time: a release folder
+        has to become a list before any of it can be asked for, and the total is
+        what makes a progress bar honest rather than a spinner.
+        """
+        virtual = self._q().get("path", [None])[0]
+        if not virtual:
+            raise JobError("path is required")
+        real = guards.validate_fetch(guards.to_real(virtual))
+        rel = self._seedbox_rel(real)
+
+        if rel is not None:
+            base = os.path.basename(real)
+            try:
+                # `--files-only` on a FILE is an rclone error, not an empty list, so
+                # a plain file has to be sized from its parent's listing instead.
+                entries = seedbox.walk_files(rel)
+            except seedbox.SeedboxError:
+                entries = []
+            if not entries:
+                try:
+                    info = seedbox.lsjson(os.path.dirname(rel))
+                except seedbox.SeedboxError as exc:
+                    return self._fail(502, f"seedbox: {exc}")
+                match = next((e for e in info if e.get("Name") == base), None)
+                if match is None:
+                    return self._fail(404, f"no such item: {virtual}")
+                if not match.get("IsDir"):
+                    size = int(match.get("Size") or 0)
+                    return self._send(200, {"path": virtual, "is_dir": False,
+                                            "files": [{"rel": base, "size": size}],
+                                            "bytes": size})
+            # walk_files normalises to lowercase keys; rclone's own are capitalised.
+            files = [{"rel": e["path"], "size": int(e.get("size") or 0)}
+                     for e in entries]
+            is_dir = True
+        elif os.path.isdir(real):
+            is_dir = True
+            files = []
+            for root, _dirs, names in os.walk(real):
+                for n in sorted(names):
+                    full = os.path.join(root, n)
+                    if os.path.islink(full) or not os.path.isfile(full):
+                        continue
+                    files.append({"rel": os.path.relpath(full, real),
+                                  "size": os.path.getsize(full)})
+        elif os.path.isfile(real):
+            is_dir = False
+            files = [{"rel": os.path.basename(real), "size": os.path.getsize(real)}]
+        else:
+            return self._fail(404, f"no such item: {virtual}")
+
+        self._send(200, {"path": guards.to_virtual(real),
+                         "is_dir": is_dir,
+                         "files": files,
+                         "bytes": sum(f["size"] for f in files)})
+
+    def _fetch(self):
+        """One file's bytes.
+
+        Read-only, and the ONLY way anything leaves this relay as content rather
+        than metadata. A seedbox path is piped straight from `rclone cat` -- never
+        staged on the NAS disk, so a 24 GB pull costs no space here.
+
+        CONTRACT: the path must be a FILE. On the NAS that is checked, because
+        `os.path.isfile` is free. On the seedbox it is NOT, because the only way to
+        ask is an `lsjson --stat` round trip -- ~0.4s each over FTP, which a
+        fifty-file release would pay fifty times for a question the caller has
+        already answered. `/v1/manifest` is what turns a directory into file paths,
+        and callers are expected to fetch only what it listed. Handing this a remote
+        directory concatenates it rather than refusing.
+        """
+        virtual = self._q().get("path", [None])[0]
+        if not virtual:
+            raise JobError("path is required")
+        real = guards.validate_fetch(guards.to_real(virtual))
+        rel = self._seedbox_rel(real)
+
+        if not _fetch_slots.acquire(blocking=False):
+            return self._fail(503, "busy: too many downloads in flight")
+        try:
+            if rel is not None:
+                try:
+                    self._stream_remote(rel)
+                except seedbox.SeedboxError as exc:
+                    return self._fail(502, f"seedbox: {exc}")
+            else:
+                if not os.path.isfile(real):
+                    return self._fail(404, f"not a file: {virtual}")
+                self._stream_local(real)
+        finally:
+            _fetch_slots.release()
+
+    def _stream_local(self, real):
+        """Content-Length, because the size is free here and it is what gives the
+        client a real progress bar."""
+        size = os.path.getsize(real)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            with open(real, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the client cancelled; nothing to clean up on a read
+
+    def _stream_remote(self, rel):
+        """Chunked, because the size is NOT free here.
+
+        Learning it would mean an `lsjson` round trip per file, and over FTP that is
+        ~1s each -- fifty files in a release would spend a minute answering a
+        question the client already has from the manifest. So the length is omitted
+        and the client uses the manifest's size for progress.
+        """
+        argv = ["rclone", "cat", seedbox.remote_path(rel)]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=seedbox.env())
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            while True:
+                chunk = proc.stdout.read(1 << 20)
+                if not chunk:
+                    break
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            # The client hanging up must not leave an rclone holding an FTP slot.
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            try:
+                proc.stdout.close()
+                proc.stderr.close()
+            except Exception:
+                pass
+
+    def _move(self):
+        """Relocate something within one drop target.
+
+        The FTP front end has always been able to do this (vfs.rename step 3);
+        the HTTP API could not, because _rename is pinned to the same parent by
+        two separate locks. Same guard shape as _delete otherwise: refuse while a
+        transfer is touching either end, and answer 409 rather than guessing when
+        the destination name is taken.
+        """
+        body = self._body()
+        virtual, dest_virtual = body.get("path"), body.get("dest_dir")
+        if not virtual or not dest_virtual:
+            raise JobError("path and dest_dir are required")
+        new_name = (body.get("new_name") or "").strip()
+        src, dest = guards.validate_move(guards.to_real(virtual),
+                                         guards.to_real(dest_virtual), new_name)
+
+        # Either end. A job writing INTO the source would lose its progress, and
+        # one writing into the destination would be overwritten from under it.
+        for row in self.jobs.snapshot("queued", "running"):
+            target = os.path.join(row["dest_dir"], row["dest_name"])
+            for path in (src, dest):
+                if (target == path or guards.under(target, path)
+                        or guards.under(path, target)):
+                    raise JobError(
+                        f"job {row['id']} is still transferring into "
+                        f"{guards.to_virtual(target)} -- cancel it first")
+
+        if os.path.exists(dest):
+            if not body.get("overwrite"):
+                # 409, not 400: this refusal can actually be ANSWERED, so it
+                # carries the name and the app asks overwrite-or-rename. Same
+                # shape as the enqueue conflict.
+                return self._fail(409,
+                                  f"{os.path.basename(dest)} already exists there",
+                                  extra={"name": os.path.basename(dest),
+                                         "existing": guards.to_virtual(dest)})
+            # Explicitly asked for, having been shown the clash. os.rename would
+            # replace a file silently but REFUSES a non-empty directory, so the
+            # destination is removed first either way.
+            try:
+                if os.path.isdir(dest):
+                    shutil.rmtree(dest)
+                else:
+                    os.remove(dest)
+            except OSError as exc:
+                raise JobError(f"could not replace {os.path.basename(dest)}: "
+                               f"{exc.strerror or exc!r}")
+        try:
+            os.rename(src, dest)
+        except OSError as exc:
+            # Same drop target by construction, so EXDEV should be unreachable --
+            # report whatever actually happened rather than assuming.
+            raise JobError(f"move failed: {exc.strerror or exc!r}")
+        self.log(f"moved {guards.to_virtual(src)} -> {guards.to_virtual(dest)}")
+        self._send(200, {"moved": guards.to_virtual(dest)})
 
     def _delete(self):
         """Remove something from the NAS. Irreversible, so the checks come first."""

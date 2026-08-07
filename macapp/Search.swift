@@ -31,20 +31,31 @@ final class SearchStore: ObservableObject {
     /// never spends a walk.
     static let minQuery = 2
 
-    /// "nas" or "seedbox". Both sides are searchable, but they are entirely
-    /// different operations underneath: the NAS is a local walk (~0.45s warm), the
-    /// seedbox is one rclone recursive listing over FTP (~19s, never warm).
-    let side: String
-    private let api: RelayAPI
+    /// The filesystem being searched. All three are searchable, but they are
+    /// entirely different operations underneath: the NAS is a local walk on the
+    /// relay (~0.45s warm), the seedbox is one rclone recursive listing over FTP
+    /// (~19s, never warm), and the Mac is a Spotlight query (milliseconds).
+    private(set) var backend: FileBackend
     /// Same idiom as `BrowseStore.reload()`: an answer that arrives after a newer
     /// query started is dropped rather than published. With a cold walk measured
     /// past 25s, out-of-order answers are ordinary rather than theoretical.
     private var generation = 0
 
-    init(api: RelayAPI, side: String) { self.api = api; self.side = side }
+    init(backend: FileBackend) { self.backend = backend }
 
-    var isSeedbox: Bool { side == "seedbox" }
-    var scopeLabel: String { isSeedbox ? "the seedbox" : "all volumes" }
+    /// Point the search at a different filesystem. Results describe the old one,
+    /// so they go with it.
+    func switchTo(_ next: FileBackend) {
+        guard next.kind != backend.kind else { return }
+        backend = next
+        clear()
+        active = false
+    }
+
+    var isSeedbox: Bool { backend.kind == .seedbox }
+    /// "all volumes" only fits the NAS, where the walk really does span every drop
+    /// target. The others describe themselves.
+    var scopeLabel: String { backend.kind == .nas ? "all volumes" : backend.label }
     var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
     var canRun: Bool { trimmed.count >= SearchStore.minQuery }
 
@@ -59,7 +70,7 @@ final class SearchStore: ObservableObject {
         running = true
         error = nil
 
-        let outcome = await api.search(q, side: side)
+        let outcome = await backend.search(q, limit: nil)
         guard mine == generation else { return }   // a newer search owns the pane
         running = false
 

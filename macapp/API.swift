@@ -112,6 +112,69 @@ actor RelayAPI {
         return r
     }
 
+    // ---------- reading bytes out, for transfers this app performs itself ----------
+
+    /// What a path is made of, so a local transfer knows its file list and total.
+    func manifest(_ path: String) async -> ManifestOutcome {
+        guard let r = request("v1/manifest?path=\(escape(path))",
+                              timeout: RelayAPI.searchTimeout) else {
+            return .unreachable("Bad base URL")
+        }
+        do {
+            let (data, resp) = try await session.data(for: r)
+            guard let http = resp as? HTTPURLResponse else { return .unreachable("No response") }
+            if http.statusCode >= 400 {
+                return .refused(serverMessage(data) ?? "Relay answered \(http.statusCode)")
+            }
+            guard let m = try? Wire.decoder.decode(Manifest.self, from: data) else {
+                return .refused("Could not read that manifest")
+            }
+            return .manifest(m)
+        } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+
+    /// One file's bytes as a stream of chunks.
+    ///
+    /// Not `session.data(for:)`: that buffers the whole response in memory, and a
+    /// 24 GB film would take the machine down. Not `session.bytes(for:)` either —
+    /// that is an `AsyncSequence` of single BYTES, and the per-element overhead
+    /// makes it useless at this size. So a delegate that hands over whole chunks as
+    /// they arrive, bridged to an `AsyncThrowingStream`.
+    nonisolated func fetchStream(_ path: String) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                guard let r = await self.fetchRequest(path) else {
+                    continuation.finish(throwing: RelayFetchError.badURL)
+                    return
+                }
+                let pump = ChunkPump(continuation: continuation)
+                let cfg = URLSessionConfiguration.ephemeral
+                cfg.urlCache = nil
+                // No overall ceiling: a big file legitimately takes hours. The
+                // per-chunk timeout below is what catches a dead connection.
+                cfg.timeoutIntervalForResource = .greatestFiniteMagnitude
+                cfg.timeoutIntervalForRequest = 120
+                let s = URLSession(configuration: cfg, delegate: pump, delegateQueue: nil)
+                let task = s.dataTask(with: r)
+                continuation.onTermination = { _ in
+                    task.cancel()
+                    s.invalidateAndCancel()
+                }
+                pump.session = s
+                task.resume()
+            }
+        }
+    }
+
+    /// The request `fetchStream` sends. Separate because building it needs the
+    /// actor's `base` and `token`, while the streaming itself must not be isolated
+    /// to the actor — one download would otherwise block every poll.
+    func fetchRequest(_ path: String) -> URLRequest? {
+        var r = request("v1/fetch?path=\(escape(path))", timeout: 120)
+        r?.timeoutInterval = 120
+        return r
+    }
+
     private func serverMessage(_ data: Data) -> String? {
         (try? Wire.decoder.decode(APIError.self, from: data))?.error
     }
@@ -489,5 +552,67 @@ actor RelayAPI {
             }
             return .result(v)
         } catch { return .unreachable(RelayAPI.describe(error)) }
+    }
+}
+
+
+enum RelayFetchError: Error, LocalizedError {
+    case badURL
+    case http(Int, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .badURL: return "Bad base URL"
+        case .http(let code, let msg):
+            return msg.isEmpty ? "Relay answered \(code)" : msg
+        }
+    }
+}
+
+/// Bridges `URLSessionDataDelegate`'s chunk callbacks to an `AsyncThrowingStream`.
+///
+/// A class rather than a closure because URLSession retains its delegate for the
+/// life of the session and hands back three separate callbacks — the response (to
+/// check the status before any bytes are trusted), each chunk, and completion.
+private final class ChunkPump: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let continuation: AsyncThrowingStream<Data, Error>.Continuation
+    /// Held so it can be torn down on completion; a session with a delegate leaks
+    /// until it is invalidated.
+    var session: URLSession?
+    private var failure: Error?
+
+    init(continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // Refuse the body: an error response is JSON, and letting it through
+            // would write the relay's error message into the file as if it were
+            // content.
+            failure = RelayFetchError.http(code, "")
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        continuation.yield(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let failure {
+            continuation.finish(throwing: failure)
+        } else if let error {
+            continuation.finish(throwing: error)
+        } else {
+            continuation.finish()
+        }
+        self.session?.finishTasksAndInvalidate()
+        self.session = nil
     }
 }

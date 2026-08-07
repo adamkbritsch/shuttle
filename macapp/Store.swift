@@ -60,10 +60,20 @@ final class RelayStore: ObservableObject {
     /// tabs on relaunch without deleting anything on the NAS.
     private let launchedAt = Date().timeIntervalSince1970
 
+    /// The three filesystems, made once and shared. The panes hold references to
+    /// these rather than making their own, so `loadTargets` has one place to push
+    /// free space into and the toggle has one instance to switch between.
+    let seedboxBackend: RelayBackend
+    let nasBackend: RelayBackend
+    let macBackend = LocalBackend()
+
     init() {
         let saved = UserDefaults.standard.string(forKey: "relay.base") ?? RelayAPI.defaultBase
         baseURL = saved
-        api = RelayAPI(base: saved)
+        let a = RelayAPI(base: saved)
+        api = a
+        seedboxBackend = RelayBackend(kind: .seedbox, api: a)
+        nasBackend = RelayBackend(kind: .nas, api: a)
     }
 
     // ---------- lifecycle ----------
@@ -91,7 +101,13 @@ final class RelayStore: ObservableObject {
     }
 
     func loadTargets() async {
-        if case .targets(let t) = await api.targets() { targets = t }
+        if case .targets(let t) = await api.targets() {
+            targets = t
+            // Free space is answered per-path by the backend, so the relay's answer
+            // has to land there too — not only in `targets` for the old label.
+            seedboxBackend.targets = t
+            nasBackend.targets = t
+        }
         await loadSeedbox()
         if case .settings(let s) = await api.settings() {
             maxConcurrent = s.maxConcurrent
@@ -133,8 +149,8 @@ final class RelayStore: ObservableObject {
 
     /// Returns true when the rename actually happened, so the caller knows whether to
     /// reload the listing (a deferred one changes nothing on disk yet).
-    func rename(path: String, newName: String) async -> Bool {
-        switch await api.rename(path: path, newName: newName) {
+    func rename(on backend: FileBackend, path: String, newName: String) async -> Bool {
+        switch await backend.rename(path: path, newName: newName) {
         case .renamed(let n): show("Renamed to \(n)", isError: false); return true
         case .deferred(let msg): show(msg, isError: false); return false
         case .unauthorized:
@@ -162,10 +178,11 @@ final class RelayStore: ObservableObject {
     /// Sequential, and that is required rather than merely tidy: `plan.steps` is
     /// ordered so a name is freed before the next step wants it, which concurrency
     /// would destroy.
-    func renameMany(_ steps: [BulkRenameStep]) async -> BulkRenameOutcome {
+    func renameMany(on backend: FileBackend,
+                    _ steps: [BulkRenameStep]) async -> BulkRenameOutcome {
         var out = BulkRenameOutcome()
         for step in steps {
-            switch await api.rename(path: step.path, newName: step.newName) {
+            switch await backend.rename(path: step.path, newName: step.newName) {
             case .renamed:
                 out.renamed += 1
             case .deferred:
@@ -332,17 +349,20 @@ final class RelayStore: ObservableObject {
         return pending
     }
 
-    func statFor(_ path: String) async -> StatResult? {
-        if case .stat(let s) = await api.stat(path) { return s }
+    func statFor(on backend: FileBackend, _ path: String) async -> StatResult? {
+        if case .stat(let s) = await backend.stat(path) { return s }
         return nil
     }
 
     /// True when it actually went, so the caller knows whether to reload a listing.
-    func delete(_ path: String) async -> Bool { await write(await api.delete(path)) }
+    func delete(on backend: FileBackend, _ path: String) async -> Bool {
+        await write(await backend.delete(path))
+    }
     /// -> the folder's path, and whether it had to be created. Nil means refused;
     /// the message has already been shown.
-    func folderFor(parent: String, name: String) async -> (path: String, created: Bool)? {
-        switch await api.mkdirJoining(parent: parent, name: name) {
+    func folderFor(on backend: FileBackend,
+                   parent: String, name: String) async -> (path: String, created: Bool)? {
+        switch await backend.mkdirJoining(parent: parent, name: name) {
         case .made(let p):   return (p, true)
         case .joined(let p): return (p, false)
         case .refused(let why): show(why, isError: true); return nil
@@ -350,8 +370,8 @@ final class RelayStore: ObservableObject {
         }
     }
 
-    func mkdir(parent: String, name: String) async -> Bool {
-        await write(await api.mkdir(parent: parent, name: name))
+    func mkdir(on backend: FileBackend, parent: String, name: String) async -> Bool {
+        await write(await backend.mkdir(parent: parent, name: name))
     }
     func retry(_ id: Int) async -> Bool { await write(await api.retry(id)) }
 
@@ -420,25 +440,49 @@ final class BrowseStore: ObservableObject {
     /// Path of the last listing that actually succeeded.
     private var loadedPath: String?
 
-    let mode: Mode
-    private let api: RelayAPI
+    /// The filesystem this pane is showing. A `var` because the destination pane
+    /// can be pointed at the Mac and back; swapping it is what the toggle does.
+    @Published private(set) var backend: FileBackend
     private weak var store: RelayStore?
 
-    private var pathKey: String { "browse.path.\(mode == .seedbox ? "source" : "dest")" }
+    var kind: BackendKind { backend.kind }
+    /// Kept so the views can keep asking the question they were asking: "is this
+    /// the source pane?". `.destinations` now means "not the seedbox" — which may
+    /// be the NAS or the Mac — and anywhere that distinction matters asks `kind`.
+    var mode: Mode { backend.kind == .seedbox ? .seedbox : .destinations }
+
+    private var pathKey: String { backend.pathKey }
     /// Not private: the row menu needs it to tell a file sitting in a release
     /// folder from one loose at the source root, where the "parent" carries no
     /// information about the film.
-    var rootPath: String { mode == .seedbox ? "/seedbox/downloads" : "/queue" }
+    var rootPath: String { backend.root }
 
-    init(mode: Mode, api: RelayAPI, store: RelayStore) {
-        self.mode = mode
-        self.api = api
+    init(backend: FileBackend, store: RelayStore) {
+        self.backend = backend
         self.store = store
         // Reopen where you left off. Relaunching and landing back at the volume list
         // when you were three folders deep is a small thing that gets old fast.
-        let saved = UserDefaults.standard.string(forKey:
-            "browse.path.\(mode == .seedbox ? "source" : "dest")")
-        path = saved ?? (mode == .seedbox ? "/seedbox/downloads" : "/queue")
+        path = UserDefaults.standard.string(forKey: backend.pathKey) ?? backend.root
+    }
+
+    /// Point this pane at a different filesystem.
+    ///
+    /// Everything derived from the old one has to go: the listing describes a tree
+    /// that is no longer on screen, and the selection holds paths that do not exist
+    /// here. The new pane opens wherever it was last left, which is why each backend
+    /// carries its own `pathKey`.
+    func switchTo(_ next: FileBackend) async {
+        guard next.kind != backend.kind else { return }
+        backend = next
+        entries = []
+        selection = []
+        filter = ""
+        error = nil
+        truncatedTotal = nil
+        loadedPath = nil
+        path = UserDefaults.standard.string(forKey: next.pathKey) ?? next.root
+        reloadGeneration &+= 1
+        if await reload() == false { await go(to: next.root) }
     }
 
     /// Falls back to the pane's root if the remembered path has gone away.
@@ -454,8 +498,11 @@ final class BrowseStore: ObservableObject {
         }
     }
 
+    /// The seedbox keeps its historical extra stop at `/seedbox`, one level above
+    /// its root; every other backend simply stops at its own root.
     var canGoUp: Bool {
-        mode == .seedbox ? path != "/seedbox" && path != "/" : path != "/queue"
+        if kind == .seedbox { return path != "/seedbox" && path != "/" }
+        return path != backend.root
     }
 
     /// Selected rows, in the order they appear in the listing rather than in
@@ -508,7 +555,7 @@ final class BrowseStore: ObservableObject {
         error = nil
         // 5000 is api.py's own BROWSE_LIMIT_MAX. Asking for it keeps the status
         // line's file/directory breakdown honest past the default 1000.
-        let result = await api.browse(requested, limit: 5000)
+        let result = await backend.browse(requested, limit: 5000)
 
         // Something newer is already in flight; it owns the pane now.
         guard mine == reloadGeneration else { return false }

@@ -21,11 +21,21 @@ final class TreeStore: ObservableObject {
     @Published private(set) var failed: [String: String] = [:]
     @Published var expanded: Set<String> = []
 
-    private let api: RelayAPI
+    private(set) var backend: FileBackend
     private var queue: [String] = []
     private var working = false
 
-    init(api: RelayAPI) { self.api = api }
+    init(backend: FileBackend) { self.backend = backend }
+
+    /// Point the tree at a different filesystem. Everything cached describes the
+    /// old one, so it all goes — including anything queued but not yet listed,
+    /// which would otherwise arrive and be filed under a path from the other tree.
+    func switchTo(_ next: FileBackend) {
+        guard next.kind != backend.kind else { return }
+        backend = next
+        queue.removeAll()
+        reset()
+    }
 
     func isLoaded(_ path: String) -> Bool { children[path] != nil }
 
@@ -66,7 +76,7 @@ final class TreeStore: ObservableObject {
             let path = queue.removeFirst()
             if children[path] != nil { continue }
             loading.insert(path)
-            switch await api.browse(path, limit: 5000) {
+            switch await backend.browse(path, limit: 5000) {
             case .listing(let l):
                 // Only directories belong in a tree.
                 children[path] = l.entries.filter(\.isDir)

@@ -27,6 +27,9 @@ struct BrowsePane: View {
     var replacingName: String? = nil
     var onReplaceWith: (Entry) -> Void = { _ in }
     var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    /// The filesystems this pane may be pointed at. Fewer than two hides the picker.
+    var backends: [FileBackend] = []
+    var onSwitch: (FileBackend) -> Void = { _ in }
     /// nil leaves this pane exactly as it was before search existed.
     var search: SearchStore? = nil
     /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
@@ -41,6 +44,7 @@ struct BrowsePane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PathBar(browse: browse, title: title,
+                    backends: backends, onSwitch: onSwitch,
                     search: search, searchActive: searchActive)
             Divider().overlay(Theme.hairline)
             content
@@ -138,12 +142,64 @@ struct BrowsePane: View {
     }
 }
 
+/// Which filesystem this pane is showing, and a menu to change it.
+///
+/// A menu rather than a segmented control: at `Theme.paneMinWidth` (330pt) the path
+/// field is already tight, and a segment per choice would take three times the room
+/// to say the same thing. It replaces the static "SOURCE"/"DESTINATION" label
+/// rather than sitting beside it — naming the actual filesystem is strictly more
+/// informative than naming the pane's role, which its position already tells you.
+private struct BackendPicker: View {
+    let current: FileBackend
+    let choices: [FileBackend]
+    let onPick: (FileBackend) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(choices, id: \.kind) { choice in
+                Button {
+                    onPick(choice)
+                } label: {
+                    // A tick, not a disabled row: the current one stays clickable so
+                    // the menu never looks broken when you open it to check.
+                    if choice.kind == current.kind {
+                        Label(choice.shortLabel, systemImage: "checkmark")
+                    } else {
+                        Text(choice.shortLabel)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: current.kind == .mac ? "laptopcomputer" : "externaldrive.fill")
+                    .font(.system(size: 10))
+                Text(current.shortLabel.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 7, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+            .fixedSize()
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Which filesystem this pane is showing")
+    }
+}
+
+
 /// FileZilla's `CViewHeader`: a label plus an editable combo of the last 20
 /// directories. Typing a path and pressing Return jumps straight there, which beats
 /// clicking down a tree when you already know the release name.
 private struct PathBar: View {
     @ObservedObject var browse: BrowseStore
     let title: String
+    /// The filesystems this pane may be pointed at. One (or none) means the pane is
+    /// fixed and the plain title is shown instead — see `feedback_hide_inert_ui`:
+    /// a control that cannot do anything should not be on screen at all.
+    var backends: [FileBackend] = []
+    var onSwitch: (FileBackend) -> Void = { _ in }
     var search: SearchStore? = nil
     var searchActive: Bool = false
 
@@ -167,10 +223,14 @@ private struct PathBar: View {
                          enabled: browse.canGoUp) {
                 Task { await browse.goUp() }
             }
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .fixedSize()
+            if backends.count > 1 {
+                BackendPicker(current: browse.backend, choices: backends, onPick: onSwitch)
+            } else {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
 
             TextField("", text: $draft)
                 .textFieldStyle(.plain)
@@ -278,21 +338,30 @@ private struct PathBar: View {
 struct FreeSpaceLabel: View {
     @ObservedObject var store: RelayStore
     let destPath: String
+    /// Asked instead of `store.targets` directly, so the Mac reports the volume the
+    /// path is actually on rather than nothing at all — the relay has no drop target
+    /// matching a local path, so the prefix search would simply find none.
+    var backend: FileBackend? = nil
 
     var body: some View {
-        if let t = target, let free = t.freeBytes {
+        if let free = backend?.freeBytes(for: destPath) ?? legacyFree {
             Text("\(humanBytes(free)) free")
                 .font(.system(size: 10.5))
                 .foregroundStyle(free < 20_000_000_000 ? Color(nsColor: .systemOrange) : .secondary)
         }
     }
 
-    private var target: Target? {
-        store.targets.first { destPath == $0.path || destPath.hasPrefix($0.path + "/") }
+    private var legacyFree: Int64? {
+        store.targets
+            .first { destPath == $0.path || destPath.hasPrefix($0.path + "/") }?
+            .freeBytes
     }
 }
 
 struct SendBar: View {
+    /// Where the send is going, so the button says it. "Send to NAS" on a build that
+    /// can also send to the Mac is a button that lies half the time.
+    var destinationBackend: FileBackend? = nil
     var store: RelayStore?
     let sources: [Entry]
     let destination: String
@@ -305,6 +374,10 @@ struct SendBar: View {
     /// a trap.
     var replacing: Entry? = nil
     var onCancelReplace: () -> Void = { }
+
+    private var sendLabel: String {
+        "Send to " + (destinationBackend?.shortLabel ?? "NAS")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -346,12 +419,15 @@ struct SendBar: View {
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.head)
-                        if let store { FreeSpaceLabel(store: store, destPath: destination) }
+                        if let store {
+                            FreeSpaceLabel(store: store, destPath: destination,
+                                           backend: destinationBackend)
+                        }
                     }
                 }
                 Spacer()
                 Button(action: action) {
-                    Text("Send to NAS").font(.system(size: 12, weight: .medium))
+                    Text(sendLabel).font(.system(size: 12, weight: .medium))
                 }
                 // The one primary action in the window, so it carries the icon's
                 // blue as a filled button rather than a bezelled default one.

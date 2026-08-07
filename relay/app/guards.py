@@ -84,6 +84,21 @@ def drop_targets():
         return set()
 
 
+def validate_fetch(real: str) -> str:
+    """A path whose BYTES may be read out over HTTP.
+
+    Read-only and deliberately permissive about depth: unlike a delete, reading
+    cannot destroy anything, so the MIN_DEPTH rules that stop you removing a whole
+    volume have no equivalent here. The one thing it must do is keep the request
+    inside the two trees this relay serves -- without that, `path=/etc/shadow`
+    would be a file read.
+    """
+    norm = os.path.normpath(real)
+    if not (under(norm, SEEDBOX) or under(norm, QUEUE)):
+        raise JobError("that path is not inside anything this relay serves")
+    return norm
+
+
 def resolve_drop_target(path: str, targets=None):
     """The drop-target root `path` sits in (or is), else None.
 

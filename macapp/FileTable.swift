@@ -297,7 +297,7 @@ struct FileTable: View {
     /// the rows are library levels rather than releases. Both boundaries were checked
     /// against the live relay, not read off the guard source.
     private var rowsAreActionable: Bool {
-        let base = browse.mode == .seedbox ? "/seedbox" : "/queue"
+        let base = browse.backend.actionableBase
         guard browse.path.hasPrefix(base) else { return false }
         return !browse.path.dropFirst(base.count).split(separator: "/").isEmpty
     }

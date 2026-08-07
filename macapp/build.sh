@@ -60,7 +60,9 @@ fi
 echo "==> Compiling"
 "$SWIFTC" -target arm64-apple-macosx14.0 -O "${SDKARGS[@]}" \
   "$SRC"/main.swift "$SRC"/Theme.swift "$SRC"/Token.swift \
-  "$SRC"/Models.swift "$SRC"/API.swift "$SRC"/Store.swift \
+  "$SRC"/Models.swift "$SRC"/API.swift \
+  "$SRC"/Backend.swift "$SRC"/LocalBackend.swift \
+  "$SRC"/LocalTransfers.swift "$SRC"/Store.swift \
   "$SRC"/SplitTree.swift "$SRC"/DirTree.swift "$SRC"/FileTable.swift \
   "$SRC"/BulkRename.swift "$SRC"/Search.swift "$SRC"/ConflictSheet.swift "$SRC"/BrowsePane.swift "$SRC"/Transfers.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework Security \

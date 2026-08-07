@@ -29,6 +29,8 @@ struct RootView: View {
     /// The pane an open Rename/Delete sheet is acting on. Both now work on either
     /// side, so reloading `dest` unconditionally would refresh the wrong list and
     /// leave the seedbox still showing something that has just been removed.
+    /// Transfers this app performs itself, because the relay cannot write to the Mac.
+    @StateObject private var local: LocalTransfers
     @State private var actionPane: BrowseStore?
     @State private var actionTree: TreeStore?
     /// Which side the user last acted on, so a global shortcut acts where they are
@@ -84,12 +86,13 @@ struct RootView: View {
     init() {
         let s = RelayStore()
         _store = StateObject(wrappedValue: s)
-        _seedbox = StateObject(wrappedValue: BrowseStore(mode: .seedbox, api: s.api, store: s))
-        _dest = StateObject(wrappedValue: BrowseStore(mode: .destinations, api: s.api, store: s))
-        _sourceTree = StateObject(wrappedValue: TreeStore(api: s.api))
-        _destTree = StateObject(wrappedValue: TreeStore(api: s.api))
-        _search = StateObject(wrappedValue: SearchStore(api: s.api, side: "nas"))
-        _sourceSearch = StateObject(wrappedValue: SearchStore(api: s.api, side: "seedbox"))
+        _seedbox = StateObject(wrappedValue: BrowseStore(backend: s.seedboxBackend, store: s))
+        _dest = StateObject(wrappedValue: BrowseStore(backend: s.nasBackend, store: s))
+        _sourceTree = StateObject(wrappedValue: TreeStore(backend: s.seedboxBackend))
+        _destTree = StateObject(wrappedValue: TreeStore(backend: s.nasBackend))
+        _search = StateObject(wrappedValue: SearchStore(backend: s.nasBackend))
+        _sourceSearch = StateObject(wrappedValue: SearchStore(backend: s.seedboxBackend))
+        _local = StateObject(wrappedValue: LocalTransfers(api: s.api))
     }
 
     var body: some View {
@@ -132,7 +135,7 @@ struct RootView: View {
                                 // Sequential, not concurrent: the relay refuses a
                                 // delete that overlaps a running transfer, and a
                                 // clear first refusal beats several racing ones.
-                                for p in paths where await store.delete(p) {
+                                for p in paths where await store.delete(on: actingPane.backend, p) {
                                     any = true
                                     gone.append(p)
                                 }
@@ -173,7 +176,7 @@ struct RootView: View {
                                 }
                                 bulkRenaming = nil
                                 Task {
-                                    let out = await store.renameMany(steps)
+                                    let out = await store.renameMany(on: actingPane.backend, steps)
                                     // Deferred renames have changed nothing on disk,
                                     // so reloading would just redraw the old names.
                                     guard out.renamed > 0 else { return }
@@ -193,7 +196,7 @@ struct RootView: View {
                                let parent = pending.path
                                newFolderParent = nil
                                Task {
-                                   if await store.mkdir(parent: parent, name: name) {
+                                   if await store.mkdir(on: dest.backend, parent: parent, name: name) {
                                        await dest.reload()
                                        destTree.refresh(parent)
                                    }
@@ -208,6 +211,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $showMoveSheet) {
             MoveToFolderSheet(items: movingItems,
+                              backend: actingPane.backend,
                               path: movePickerPath,
                               folders: movePickerFolders,
                               loading: movePickerLoading,
@@ -239,7 +243,7 @@ struct RootView: View {
                                 return
                             }
                             Task {
-                                let didRename = await store.rename(path: path, newName: newName)
+                                let didRename = await store.rename(on: actingPane.backend, path: path, newName: newName)
                                 // A deferred rename changes nothing on disk yet, so
                                 // reloading would just redraw the old name.
                                 if didRename {
@@ -430,10 +434,11 @@ struct RootView: View {
                                                  holdingPriority: Theme.Hold.absorbs),
                                    column(key: "dest.split", search: search, browse: dest,
                                           tree: destTree, title: "DESTINATION",
-                                          treeRoot: "/queue",
+                                          treeRoot: dest.backend.root,
                                           // NAS volumes are a small, near-static set.
                                           startsCollapsed: false) {
-                                            SendBar(store: store,
+                                            SendBar(destinationBackend: dest.backend,
+                                                    store: store,
                                                     sources: seedbox.selectedEntries,
                                                     destination: dest.path,
                                                     enabled: canSend,
@@ -446,7 +451,7 @@ struct RootView: View {
                                      canCollapse: true,
                                      holdingPriority: Theme.Hold.holdsFirmly,
                                      seed: Theme.queueSeed)) {
-                TransfersPane(store: store, tab: $tab, selected: $selectedTransfer)
+                TransfersPane(store: store, local: local, tab: $tab, selected: $selectedTransfer)
             },
         ])
     }
@@ -488,6 +493,9 @@ struct RootView: View {
                                replacingName: replacing?.name,
                                onReplaceWith: { confirmReplace(with: $0) },
                                onMoveToFolder: { beginMoveToFolder($0, in: browse, tree: tree) },
+                               backends: backendChoices(for: browse),
+                               onSwitch: { switchPane(browse, tree: tree,
+                                                      search: search, to: $0) },
                                search: search,
                                searchActive: search.active,
                                onPickResult: { pickResult($0, in: browse, tree: tree) },
@@ -526,7 +534,41 @@ struct RootView: View {
     private var canSend: Bool {
         replacing == nil
             && !seedbox.selectedEntries.isEmpty
-            && dest.path != "/queue" && dest.path.hasPrefix("/queue/")
+            && dest.backend.isInsideRoot(dest.path)
+    }
+
+    /// What a pane may be switched to.
+    ///
+    /// The destination always offers both. The SOURCE offers a choice only while the
+    /// destination is the Mac — with the NAS on the right, a NAS source would mean
+    /// NAS-to-NAS, which is what Move already is, so the control would be inert.
+    private func backendChoices(for pane: BrowseStore) -> [FileBackend] {
+        if pane === dest { return [store.nasBackend, store.macBackend] }
+        guard dest.kind == .mac else { return [] }
+        return [store.seedboxBackend, store.nasBackend]
+    }
+
+    /// Point a pane — listing, tree and search together — at another filesystem.
+    private func switchPane(_ pane: BrowseStore, tree: TreeStore,
+                            search: SearchStore, to next: FileBackend) {
+        guard next.kind != pane.kind else { return }
+        // An armed replace names an item on the pane that is about to change under
+        // it, and a parked conflict holds paths from the old tree.
+        cancelReplace()
+        conflict = nil
+        tree.switchTo(next)
+        search.switchTo(next)
+        Task {
+            await pane.switchTo(next)
+            // Leaving the Mac takes the source's choice away with it, so a NAS source
+            // would otherwise be stranded pointing at the same filesystem as the
+            // destination.
+            if pane === dest, next.kind == .nas, seedbox.kind == .nas {
+                sourceTree.switchTo(store.seedboxBackend)
+                sourceSearch.switchTo(store.seedboxBackend)
+                await seedbox.switchTo(store.seedboxBackend)
+            }
+        }
     }
 
     private var actingPane: BrowseStore { actionPane ?? dest }
@@ -602,9 +644,8 @@ struct RootView: View {
     /// identical.
     private func enqueue(_ sources: [Entry], as destName: String? = nil) {
         guard !sources.isEmpty else { return }
-        guard dest.path != "/queue", dest.path.hasPrefix("/queue/") else {
-            store.show("Pick a destination folder first — /queue itself is the list of volumes",
-                       isError: true)
+        guard dest.backend.isInsideRoot(dest.path) else {
+            store.show(dest.backend.pickAFolderHint, isError: true)
             return
         }
         let destPath = dest.path
@@ -628,10 +669,12 @@ struct RootView: View {
             // each through the relay's own validate_request gate.
             for src in ordered {
                 // Nil policy means "ask": the relay scans the destination and answers
-                // 409 rather than silently overwriting.
-                let report = await store.send(src: src.path, destDir: destPath,
-                                              onConflict: conflictPolicy,
-                                              destName: destName)
+                // 409 rather than silently overwriting. The local engine answers the
+                // same question from `FileManager` before it queues anything.
+                let report = await queueOne(path: src.path, name: src.name,
+                                            destDir: destPath,
+                                            onConflict: conflictPolicy,
+                                            destName: destName)
                 if let report {
                     // Park the rest of the selection behind the sheet: answering it
                     // resumes them with whatever was chosen.
@@ -645,6 +688,28 @@ struct RootView: View {
         }
     }
 
+    /// Queue one item, on whichever engine owns the destination.
+    ///
+    /// The relay moves bytes between two machines it can both reach; it cannot write
+    /// to this Mac, so a Mac destination is transferred by this process instead. The
+    /// two answer the same way — nil for queued, a `ConflictReport` for "something is
+    /// already there" — which is what lets one conflict sheet serve both.
+    private func queueOne(path: String, name: String, destDir: String,
+                          onConflict: ConflictAction?,
+                          destName: String? = nil) async -> ConflictReport? {
+        guard dest.kind == .mac else {
+            return await store.send(src: path, destDir: destDir,
+                                    onConflict: onConflict, destName: destName)
+        }
+        if onConflict == nil,
+           let report = local.clash(for: name, in: destDir, destName: destName) {
+            return report
+        }
+        local.send(src: path, srcName: name, destDir: destDir,
+                   destName: destName, onConflict: onConflict)
+        return nil
+    }
+
     /// Applies the sheet's answer to the item that tripped it, then continues with
     /// whatever was left of the selection.
     private func resolve(_ pending: PendingConflict,
@@ -654,12 +719,15 @@ struct RootView: View {
         // only some files collide, the rest must still go. Sending it to the relay
         // as --ignore-existing reproduces that; returning early would silently drop
         // every non-conflicting file in the directory.
-        await store.send(src: pending.src, destDir: pending.destDir,
-                         onConflict: action,
-                         destName: action == .rename ? newName : nil)
+        _ = await queueOne(path: pending.src,
+                           name: (pending.src as NSString).lastPathComponent,
+                           destDir: pending.destDir,
+                           onConflict: action,
+                           destName: action == .rename ? newName : nil)
         for src in pending.remaining {
-            let report = await store.send(src: src.path, destDir: pending.destDir,
-                                          onConflict: conflictPolicy)
+            let report = await queueOne(path: src.path, name: src.name,
+                                        destDir: pending.destDir,
+                                        onConflict: conflictPolicy)
             if let report {
                 conflict = PendingConflict(
                     src: src.path, destDir: pending.destDir, report: report,
@@ -683,7 +751,7 @@ struct RootView: View {
         Task {
             var files = 0, bytes: Int64 = 0
             for e in items {
-                guard let s = await store.statFor(e.path) else { continue }
+                guard let s = await store.statFor(on: pane.backend, e.path) else { continue }
                 files += s.files
                 bytes += s.bytes
             }
@@ -715,7 +783,7 @@ struct RootView: View {
         replaceSource = nil
         replaceSourceStat = nil
         pendingReplace = nil
-        Task { replaceStat = await store.statFor(entry.path) }
+        Task { replaceStat = await store.statFor(on: dest.backend, entry.path) }
         store.show("Replacing \(entry.name) — right-click what should replace it", isError: false)
     }
 
@@ -739,7 +807,7 @@ struct RootView: View {
         replaceSource = source
         replaceSourceStat = nil
         pendingReplace = PendingReplace(target: target, source: source)
-        Task { replaceSourceStat = await store.statFor(source.path) }
+        Task { replaceSourceStat = await store.statFor(on: seedbox.backend, source.path) }
     }
 
     /// Queue the copy, carrying the "and then delete that" instruction with it.
@@ -784,7 +852,7 @@ struct RootView: View {
         movePickerLoading = true
         let selected = Set(movingItems.map(\.path))
         Task {
-            let listing = await store.api.browse(path, limit: 5000)
+            let listing = await actingPane.backend.browse(path, limit: 5000)
             guard mine == movePickerGeneration else { return }
             movePickerLoading = false
             guard case .listing(let l) = listing else {
@@ -821,7 +889,8 @@ struct RootView: View {
                 // item move UP to sit beside the folder it was inside.
                 folder = parent
             } else {
-                guard let made = await store.folderFor(parent: parent, name: typed) else { return }
+                guard let made = await store.folderFor(on: pane.backend, parent: parent, name: typed)
+                else { return }
                 folder = made.path
                 if !made.created {
                     store.show("Using the folder “\(typed)” that was already here",
@@ -838,7 +907,7 @@ struct RootView: View {
                           pane: BrowseStore, tree: TreeStore) async {
         var moved = 0
         for (i, item) in items.enumerated() {
-            switch await store.api.move(item.path, into: folder) {
+            switch await pane.backend.move(item.path, into: folder, newName: nil, overwrite: false) {
             case .moved:
                 moved += 1
             case .clash(let name, let existing):
@@ -888,9 +957,9 @@ struct RootView: View {
         moveClash = nil
         let pane = actingPane, tree = actingTree
         Task {
-            let outcome = await store.api.move(clash.item.path, into: clash.folder,
-                                               newName: overwrite ? nil : newName,
-                                               overwrite: overwrite)
+            let outcome = await pane.backend.move(clash.item.path, into: clash.folder,
+                                                  newName: overwrite ? nil : newName,
+                                                  overwrite: overwrite)
             if case .refused(let why) = outcome { store.show(why, isError: true) }
             if case .unreachable(let why) = outcome { store.show(why, isError: true) }
             await moveEach(clash.remaining, into: clash.folder, pane: pane, tree: tree)
@@ -916,7 +985,7 @@ struct RootView: View {
     /// The race resolves itself either way: if the copy has already finished, the
     /// relay finds no active job and simply renames the file that is now on disk.
     private func downloadAndRename(_ entry: Entry, to newName: String) {
-        guard dest.path != "/queue", dest.path.hasPrefix("/queue/") else {
+        guard dest.backend.isInsideRoot(dest.path) else {
             store.show("Pick a destination folder first — /queue itself is the list of volumes",
                        isError: true)
             return
@@ -989,8 +1058,9 @@ struct RootView: View {
 
     /// Short label for the destination, used in the context-menu wording.
     private var destinationLabel: String {
-        guard dest.path.hasPrefix("/queue/") else { return "" }
-        return String(dest.path.dropFirst("/queue/".count))
+        guard dest.backend.isInsideRoot(dest.path) else { return "" }
+        let root = dest.backend.root
+        return String(dest.path.dropFirst(root == "/" ? 1 : root.count + 1))
     }
 
     private func refreshAll() async {

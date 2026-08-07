@@ -47,6 +47,15 @@ struct Listing: Decodable, Equatable {
     let offset: Int
     let limit: Int
     let truncated: Bool
+
+    /// For `LocalBackend`, which answers the same shape from `FileManager`.
+    /// Decodable's implicit memberwise init is not visible from another file.
+    init(path: String, parent: String?, entries: [Entry],
+         total: Int, offset: Int = 0, limit: Int, truncated: Bool) {
+        self.path = path; self.parent = parent; self.entries = entries
+        self.total = total; self.offset = offset; self.limit = limit
+        self.truncated = truncated
+    }
 }
 
 /// A whole-NAS search result set.
@@ -66,6 +75,14 @@ struct SearchResults: Decodable, Equatable {
     /// `truncated`: a timeout with no rows is NOT "no matches".
     let timedOut: Bool
     let elapsedMs: Int
+
+    /// See `Listing.init` — same reason.
+    init(query: String, entries: [Entry], total: Int, limit: Int,
+         truncated: Bool, timedOut: Bool, elapsedMs: Int) {
+        self.query = query; self.entries = entries; self.total = total
+        self.limit = limit; self.truncated = truncated
+        self.timedOut = timedOut; self.elapsedMs = elapsedMs
+    }
 }
 
 struct Target: Decodable, Identifiable, Equatable {
@@ -114,8 +131,35 @@ struct Job: Decodable, Identifiable, Equatable {
     let updatedAt: Double?
     let finishedAt: Double?
 
+    /// A local transfer, presented as a `Job` so the whole Transfers pane renders it
+    /// unchanged. Ids are NEGATIVE — that is the discriminator the pane's row actions
+    /// use to send Cancel/Dismiss/Retry to the local engine instead of the relay.
+    init(_ j: LocalJob) {
+        id = j.id
+        state = j.state.rawValue
+        isDir = j.filesTotal > 1
+        src = j.src
+        destDir = j.destDir
+        destName = j.name
+        bytesDone = j.bytesDone
+        bytesTotal = j.bytesTotal
+        percent = j.pct * 100
+        speed = 0
+        eta = -1
+        filesDone = j.filesDone
+        filesTotal = j.filesTotal
+        error = j.error
+        destPreexisted = false
+        replacePath = nil
+        createdAt = j.startedAt
+        updatedAt = j.startedAt
+        finishedAt = j.finishedAt
+    }
+
     var kind: JobKind { JobKind(rawValue: state) ?? .unknown }
     var isActive: Bool { kind == .queued || kind == .running }
+    /// True for a transfer this app is performing itself. See `init(_ LocalJob)`.
+    var isLocal: Bool { id < 0 }
 
     var symbol: String {
         switch kind {
@@ -225,6 +269,14 @@ struct Conflict: Decodable, Equatable, Identifiable {
         case destSize = "dest_size"
         case destMtime = "dest_mtime"
     }
+
+    /// For `LocalTransfers`, which reports a clash from `FileManager` attributes
+    /// rather than decoding one off the wire.
+    init(path: String, srcSize: Int64, srcMtime: Double,
+         destSize: Int64, destMtime: Double) {
+        self.path = path; self.srcSize = srcSize; self.srcMtime = srcMtime
+        self.destSize = destSize; self.destMtime = destMtime
+    }
 }
 
 /// The relay's 409 body: it refused the enqueue and is asking what to do.
@@ -236,6 +288,11 @@ struct ConflictReport: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case destName = "dest_name"
         case conflicts, truncated
+    }
+
+    /// See `Conflict.init` — same reason.
+    init(destName: String, conflicts: [Conflict], truncated: Bool) {
+        self.destName = destName; self.conflicts = conflicts; self.truncated = truncated
     }
 }
 
@@ -339,5 +396,10 @@ struct StatResult: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case path, files, bytes
         case isDir = "is_dir"
+    }
+
+    /// See `Listing.init` — same reason.
+    init(path: String, isDir: Bool, files: Int, bytes: Int64) {
+        self.path = path; self.isDir = isDir; self.files = files; self.bytes = bytes
     }
 }

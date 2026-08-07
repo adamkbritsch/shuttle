@@ -592,6 +592,8 @@ struct ReplaceSheet: View {
 /// destination that is guaranteed to be rejected.
 struct MoveToFolderSheet: View {
     let items: [Entry]
+    /// Whose rules apply to how far up this sheet may browse.
+    let backend: FileBackend
     /// The directory being browsed, and its folders. Both are owned by the caller
     /// because loading them is an async listing.
     let path: String
@@ -615,12 +617,10 @@ struct MoveToFolderSheet: View {
             && !trimmed.contains("/")
     }
 
-    /// Up stops at the volume: /queue/MediaVolume3 is as far as a move can go.
-    private var parent: String? {
-        let up = (path as NSString).deletingLastPathComponent
-        guard up.hasPrefix("/queue/"), up != "/queue" else { return nil }
-        return up
-    }
+    /// How far up you may browse is the backend's rule, not this sheet's: the NAS
+    /// stops at the volume because its move is `os.rename`, while the Mac can go
+    /// all the way to `/` because FileManager copies across volumes.
+    private var parent: String? { backend.moveParent(of: path) }
 
     private var movingHere: Bool { chosen == nil && trimmed.isEmpty }
     private var canConfirm: Bool {
