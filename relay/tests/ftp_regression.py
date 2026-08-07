@@ -120,6 +120,15 @@ def main():
     wait_idle()
 
     print("== fallback B (MKD) ==")
+    # Both MKD targets are removed first because this section CREATES them and
+    # nothing else does. Without this the suite passes once and then reports
+    # "REFUSED 550 File exists" on every subsequent run -- a failure that looks
+    # like a regression in the guards and is really just last run's leftovers.
+    for leftover in ("OpenVPN", "NotAReleaseName"):
+        try:
+            f.rmd(f"{SCRATCH}/{leftover}")
+        except ftplib.all_errors:
+            pass          # absent is the normal case
     expect("MKD naming a real release", lambda: f.mkd(f"{SCRATCH}/OpenVPN"))
     wait_idle()
     # THE branch that must survive the refactor: a name that is NOT a release must
