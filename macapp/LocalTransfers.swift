@@ -169,8 +169,21 @@ final class LocalTransfers: NSObject, ObservableObject {
                 return finish(id, .failed, error: why)
             case .proceed(let finalPath):
                 let base = done
-                let outcome = await fetch(remote, to: finalPath, jobID: id) { got in
+                // One retry on a transport failure, and only on a transport failure.
+                // This path is meant to work from networks that block a direct
+                // seedbox connection, which in practice also means captive portals
+                // and DERP-relayed links that drop a connection now and then. Losing
+                // a whole release to one dropped socket would be the common case
+                // rather than the rare one. A refusal is NOT retried -- it would fail
+                // identically the second time.
+                var outcome = await fetch(remote, to: finalPath, jobID: id) { got in
                     self.update(id) { $0.bytesDone = base + got }
+                }
+                if case .failed = outcome, !cancelled.contains(id) {
+                    update(id) { $0.bytesDone = base }
+                    outcome = await fetch(remote, to: finalPath, jobID: id) { got in
+                        self.update(id) { $0.bytesDone = base + got }
+                    }
                 }
                 if case .failed(let why) = outcome {
                     return finish(id, cancelled.contains(id) ? .cancelled : .failed, error: why)

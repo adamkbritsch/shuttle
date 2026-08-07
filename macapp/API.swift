@@ -93,6 +93,13 @@ actor RelayAPI {
     /// the relay allows it 120s. 30s would have failed a remote search that was
     /// working perfectly.
     static let searchTimeout: TimeInterval = 60
+    /// Its own budget, well past `searchTimeout`, because a manifest is two slow
+    /// things stacked: an `rclone lsjson --recursive` on the seedbox (measured at
+    /// 18.9s for 737 entries, and it never warms) plus however long the tailnet
+    /// takes. On a network that blocks UDP, Tailscale falls back to DERP over 443
+    /// and every round trip gets slower -- which is precisely the network this
+    /// whole path exists to work on, so the budget has to assume it.
+    static let manifestTimeout: TimeInterval = 240
 
     private func request(_ path: String, method: String = "GET",
                          body: [String: String]? = nil,
@@ -117,7 +124,7 @@ actor RelayAPI {
     /// What a path is made of, so a local transfer knows its file list and total.
     func manifest(_ path: String) async -> ManifestOutcome {
         guard let r = request("v1/manifest?path=\(escape(path))",
-                              timeout: RelayAPI.searchTimeout) else {
+                              timeout: RelayAPI.manifestTimeout) else {
             return .unreachable("Bad base URL")
         }
         do {

@@ -151,11 +151,19 @@ is no `rclone.conf` to maintain.
   of the time, because with the NAS on both sides it would only offer to move
   something to where it already is.
 
-  Bytes still come through the relay: it reads the file and streams it, so nothing
-  is staged on the NAS's disk and no server credentials live on the Mac. That is
-  not the slower path it sounds like — the remote-to-NAS and remote-to-Mac legs
-  share the same uplink, while NAS-to-Mac is local, so a streamed two-hop transfer
-  runs at the speed of the leg that was always the bottleneck.
+  Bytes always come through the relay, and that is the point rather than a
+  shortcut. The Mac talks only to the NAS, over the private network the app
+  already uses — so this works from a network that blocks the remote server
+  outright, which a direct connection would not. It also means no server
+  credentials live on the Mac and nothing is staged on the NAS's disk; the relay
+  reads each file and streams it straight through. On the same LAN the extra leg
+  costs nothing measurable, since the internet leg is crossed once either way and
+  is the bottleneck regardless.
+
+  Because that path is expected to be the slow, awkward one, it is built for it:
+  a manifest gets a four-minute budget rather than the usual one, and a file that
+  dies mid-transfer is retried once — a dropped socket on a captive-portal network
+  should not cost a whole release.
 
   Two honest differences from a NAS transfer. **It stops if you quit Shuttle** —
   the relay's queue survives a restart because it runs on the NAS, and this one
