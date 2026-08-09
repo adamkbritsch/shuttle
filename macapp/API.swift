@@ -173,6 +173,35 @@ actor RelayAPI {
         }
     }
 
+    /// Send one file's bytes to the relay, which writes them to `path`.
+    ///
+    /// `uploadTask(with:fromFile:)` rather than an in-memory body: the point of
+    /// streaming from a file URL is that a 24 GB upload never becomes a 24 GB
+    /// `Data`. Progress comes from the delegate, since the async convenience API
+    /// reports none.
+    nonisolated func upload(file: URL, to path: String,
+                            progress: @escaping @Sendable (Int64) -> Void) async -> UploadOutcome {
+        guard let base = await self.uploadRequest(path) else { return .unreachable("Bad base URL") }
+        return await withCheckedContinuation { (cont: CheckedContinuation<UploadOutcome, Never>) in
+            let pump = UploadPump(progress: progress, finish: cont.resume(returning:))
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.urlCache = nil
+            cfg.timeoutIntervalForResource = .greatestFiniteMagnitude
+            cfg.timeoutIntervalForRequest = 120
+            let s = URLSession(configuration: cfg, delegate: pump, delegateQueue: nil)
+            pump.session = s
+            s.uploadTask(with: base, fromFile: file).resume()
+        }
+    }
+
+    func uploadRequest(_ path: String) -> URLRequest? {
+        var r = request("v1/upload?path=\(escape(path))", method: "POST", timeout: 120)
+        // Set explicitly: `request` only adds it alongside a JSON body, and the
+        // relay reads Content-Length to know when the file ends.
+        r?.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        return r
+    }
+
     /// The request `fetchStream` sends. Separate because building it needs the
     /// actor's `base` and `token`, while the streaming itself must not be isolated
     /// to the actor — one download would otherwise block every poll.
@@ -621,5 +650,62 @@ private final class ChunkPump: NSObject, URLSessionDataDelegate, @unchecked Send
         }
         self.session?.finishTasksAndInvalidate()
         self.session = nil
+    }
+}
+
+
+enum UploadOutcome { case ok(Int64); case refused(String); case unreachable(String) }
+
+/// Progress and completion for one upload. Mirrors `ChunkPump` on the way out.
+private final class UploadPump: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let progress: @Sendable (Int64) -> Void
+    private let finish: (UploadOutcome) -> Void
+    private var body = Data()
+    private var status = 0
+    private var done = false
+    var session: URLSession?
+
+    init(progress: @escaping @Sendable (Int64) -> Void,
+         finish: @escaping (UploadOutcome) -> Void) {
+        self.progress = progress
+        self.finish = finish
+    }
+
+    /// Guards the continuation: resuming one twice is a crash, and a cancelled
+    /// task can deliver both a response and an error.
+    private func settle(_ outcome: UploadOutcome) {
+        guard !done else { return }
+        done = true
+        finish(outcome)
+        session?.finishTasksAndInvalidate()
+        session = nil
+    }
+
+    func urlSession(_ s: URLSession, task: URLSessionTask, didSendBodyData sent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        progress(totalBytesSent)
+    }
+
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        body.append(data)
+    }
+
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            settle(.unreachable(RelayAPI.describe(error)))
+            return
+        }
+        let msg = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        if status >= 400 {
+            settle(.refused(msg?["error"] as? String ?? "Relay answered \(status)"))
+            return
+        }
+        settle(.ok((msg?["bytes"] as? NSNumber)?.int64Value ?? 0))
     }
 }

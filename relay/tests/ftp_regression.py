@@ -99,6 +99,32 @@ def wait_idle(limit=60):
     return False
 
 
+def _rmtree(f, path):
+    """Remove a directory over FTP, contents and all.
+
+    RMD refuses a non-empty directory, and the sibling api_guards.py suite leaves a
+    POPULATED /queue/_scratch/OpenVPN behind from its transfer cases. A plain rmd
+    here silently failed, so the MKD check below reported "550 File exists" and
+    looked like a guard regression.
+    """
+    try:
+        names = f.nlst(path)
+    except ftplib.all_errors:
+        return                       # absent is the normal case
+    for name in names:
+        child = name if name.startswith("/") else f"{path}/{name}"
+        if child.rstrip("/") == path.rstrip("/"):
+            continue                 # some servers list the directory itself
+        try:
+            f.delete(child)
+        except ftplib.all_errors:
+            _rmtree(f, child)        # it was a directory, not a file
+    try:
+        f.rmd(path)
+    except ftplib.all_errors:
+        pass
+
+
 def main():
     f = connect()
     print("== browse ==")
@@ -125,10 +151,7 @@ def main():
     # "REFUSED 550 File exists" on every subsequent run -- a failure that looks
     # like a regression in the guards and is really just last run's leftovers.
     for leftover in ("OpenVPN", "NotAReleaseName"):
-        try:
-            f.rmd(f"{SCRATCH}/{leftover}")
-        except ftplib.all_errors:
-            pass          # absent is the normal case
+        _rmtree(f, f"{SCRATCH}/{leftover}")
     expect("MKD naming a real release", lambda: f.mkd(f"{SCRATCH}/OpenVPN"))
     wait_idle()
     # THE branch that must survive the refactor: a name that is NOT a release must

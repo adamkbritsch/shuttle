@@ -381,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._rename()
             if path == "/v1/delete":
                 return self._delete()
+            if path == "/v1/upload":
+                return self._upload()
             if path == "/v1/move":
                 return self._move()
             if path == "/v1/mkdir":
@@ -605,10 +607,17 @@ class Handler(BaseHTTPRequestHandler):
                                "it cannot target the seedbox")
             replace_real = guards.validate_delete(replace_real)
 
-        # The same gate the FTP path uses. Deliberately no breadcrumb file: that
-        # exists only to paper over FileZilla's phantom move, and the app has real
-        # job state, so writing one here would just litter the destination.
-        src, dest_dir, dest_name = guards.validate_request(src, dest_dir, dest_name)
+        # Which door depends on which way this is going. The pull keeps
+        # validate_request untouched -- the FTP front end shares it, and
+        # tests/ftp_regression.py diffs its exact refusal strings.
+        pushing = guards.under(os.path.normpath(dest_dir), guards.SEEDBOX)
+        if pushing:
+            src, dest_dir, dest_name = guards.validate_push(src, dest_dir, dest_name)
+        else:
+            # Deliberately no breadcrumb file: that exists only to paper over
+            # FileZilla's phantom move, and the app has real job state, so writing
+            # one here would just litter the destination.
+            src, dest_dir, dest_name = guards.validate_request(src, dest_dir, dest_name)
 
         # FileZilla's "Target file already exists" gate. Without a policy the
         # enqueue is REFUSED with 409 and the conflict list, so the app can ask
@@ -619,6 +628,12 @@ class Handler(BaseHTTPRequestHandler):
         policy = (body.get("on_conflict") or "ask").strip()
         if policy not in jobsmod.CONFLICT_POLICIES:
             raise JobError("unknown on_conflict: " + policy)
+        if policy == "ask" and pushing:
+            # scan_conflicts walks the DESTINATION, and this one is not a local
+            # filesystem. Rather than pretend it found nothing (which would report
+            # "no conflicts" for a destination it never looked at), the push is
+            # explicit that it overwrites, and the app says so before sending.
+            policy = "overwrite"
         if policy == "ask":
             conflicts, truncated = jobsmod.scan_conflicts(src, dest_dir, dest_name)
             if conflicts:
@@ -697,6 +712,93 @@ class Handler(BaseHTTPRequestHandler):
             raise JobError(f"no such folder: {guards.to_virtual(real)}")
         rel = os.path.relpath(norm, alias_root)
         return "" if rel == "." else rel
+
+    def _upload(self):
+        """Write one file, streamed from the request body.
+
+        The mirror of `_fetch`, and the only way bytes come INTO this relay. A Mac
+        upload is a stream through here rather than a staged copy: for a seedbox
+        destination the body is piped straight into `rclone rcat`, so a 24 GB file
+        never touches the NAS disk on its way past.
+
+        The client sends one request per FILE, not per folder -- it already walks
+        its own directory, and per-file requests are what make progress and the
+        retry-once-on-drop behaviour possible.
+        """
+        virtual = self._q().get("path", [None])[0]
+        if not virtual:
+            raise JobError("path is required")
+        real = guards.validate_upload(guards.to_real(virtual))
+        size = int(self.headers.get("Content-Length") or 0)
+        if size <= 0:
+            raise JobError("Content-Length is required and must be positive")
+
+        rel = self._seedbox_rel(real)
+        if rel is not None:
+            written = self._recv_remote(rel, size)
+        else:
+            written = self._recv_local(real, size)
+        if written != size:
+            return self._fail(400, f"expected {size} bytes, received {written}")
+        self.log(f"uploaded {guards.to_virtual(real)} ({written} bytes)")
+        self._send(201, {"path": guards.to_virtual(real), "bytes": written})
+
+    def _read_body_into(self, sink, size):
+        """Pump exactly `size` bytes from the request into `sink`. Bounded by the
+        declared length rather than reading to EOF, because on a keep-alive
+        connection there IS no EOF -- reading past the body would swallow the next
+        request off the same socket."""
+        left = size
+        while left > 0:
+            chunk = self.rfile.read(min(1 << 20, left))
+            if not chunk:
+                break
+            sink(chunk)
+            left -= len(chunk)
+        return size - left
+
+    def _recv_local(self, real, size):
+        """To a `.part` first, renamed only once the whole body arrived. A half
+        file under the real name would look complete to everything that later reads
+        that folder -- Plex included."""
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        part = real + ".part"
+        try:
+            with open(part, "wb") as fh:
+                written = self._read_body_into(fh.write, size)
+            if written != size:
+                os.remove(part)
+                return written
+            os.replace(part, real)
+            return written
+        except OSError as exc:
+            if os.path.exists(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+            raise JobError(f"could not write that file: {exc.strerror or exc!r}")
+
+    def _recv_remote(self, rel, size):
+        """Piped into `rclone rcat`, which reads the file from stdin and creates
+        any missing parent directories on the way."""
+        argv = ["rclone", "rcat", seedbox.remote_path(rel)]
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=seedbox.env())
+        try:
+            written = self._read_body_into(proc.stdin.write, size)
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            proc.kill()
+            proc.wait(timeout=10)
+            raise JobError("the upload connection dropped")
+        rc = proc.wait(timeout=600)
+        if rc != 0:
+            err = (proc.stderr.read() or b"").decode(errors="replace").strip()
+            last = err.splitlines()[-1] if err else f"rclone exit {rc}"
+            raise JobError(f"seedbox refused the upload: {last}")
+        return written
 
     def _manifest(self):
         """A path flattened to the files it contains, with sizes.
@@ -778,34 +880,78 @@ class Handler(BaseHTTPRequestHandler):
         real = guards.validate_fetch(guards.to_real(virtual))
         rel = self._seedbox_rel(real)
 
+        start = self._range_start()
+        if start is None and self.headers.get("Range"):
+            return self._fail(416, "only a single open-ended range is supported, "
+                                   "e.g. 'Range: bytes=1024-'")
+
         if not _fetch_slots.acquire(blocking=False):
             return self._fail(503, "busy: too many downloads in flight")
         try:
             if rel is not None:
                 try:
-                    self._stream_remote(rel)
+                    self._stream_remote(rel, start)
                 except seedbox.SeedboxError as exc:
                     return self._fail(502, f"seedbox: {exc}")
             else:
                 if not os.path.isfile(real):
                     return self._fail(404, f"not a file: {virtual}")
-                self._stream_local(real)
+                self._stream_local(real, start)
         finally:
             _fetch_slots.release()
 
-    def _stream_local(self, real):
-        """Content-Length, because the size is free here and it is what gives the
-        client a real progress bar."""
-        size = os.path.getsize(real)
+    def _range_start(self):
+        """The N from `Range: bytes=N-`, or None.
+
+        Deliberately narrow. Only the single open-ended form is honoured, because
+        that is the only one resume needs: a client that lost the connection knows
+        how many bytes it kept and asks for the rest. Multi-range and suffix ranges
+        would each need a different response shape (multipart, and a length known
+        up front) for no caller that exists. Anything else is refused with 416
+        rather than silently served whole, which would corrupt the file the client
+        is appending to.
+        """
+        header = (self.headers.get("Range") or "").strip()
+        if not header:
+            return None
+        if not header.startswith("bytes="):
+            return None
+        spec = header[len("bytes="):].strip()
+        if "," in spec or not spec.endswith("-"):
+            return None
         try:
-            self.send_response(200)
+            start = int(spec[:-1])
+        except ValueError:
+            return None
+        return start if start >= 0 else None
+
+    def _stream_local(self, real, start=None):
+        """Content-Length, because the size is free here and it is what gives the
+        client a real progress bar. With a Range, a seek and a 206."""
+        size = os.path.getsize(real)
+        if start is not None and start > size:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        try:
+            partial = start is not None and start > 0
+            self.send_response(206 if partial else 200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(size))
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+                self.send_header("Content-Length", str(size - start))
+            else:
+                self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             if self.command == "HEAD":
                 return
             with open(real, "rb") as fh:
+                if partial:
+                    fh.seek(start)
                 while True:
                     chunk = fh.read(1 << 20)
                     if not chunk:
@@ -814,7 +960,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass   # the client cancelled; nothing to clean up on a read
 
-    def _stream_remote(self, rel):
+    def _stream_remote(self, rel, start=None):
         """Chunked, because the size is NOT free here.
 
         Learning it would mean an `lsjson` round trip per file, and over FTP that is
@@ -822,12 +968,34 @@ class Handler(BaseHTTPRequestHandler):
         question the client already has from the manifest. So the length is omitted
         and the client uses the manifest's size for progress.
         """
+        # A resumed fetch is the one case worth paying `lsjson --stat` for: a 206
+        # needs a real Content-Range, and one round trip is nothing against
+        # restarting a 60 GB download from zero. The no-Range path is untouched and
+        # still costs no extra round trip.
+        partial = start is not None and start > 0
+        total = None
+        if partial:
+            total = seedbox.size_of(rel)
+            if total is None:
+                return self._fail(404, "not a file on the seedbox")
+            if start > total:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{total}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
         argv = ["rclone", "cat", seedbox.remote_path(rel)]
+        if partial:
+            argv[2:2] = ["--offset", str(start)]
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=seedbox.env())
         try:
-            self.send_response(200)
+            self.send_response(206 if partial else 200)
             self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{total - 1}/{total}")
             self.send_header("Transfer-Encoding", "chunked")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
@@ -955,6 +1123,27 @@ class Handler(BaseHTTPRequestHandler):
             raise JobError("parent is required")
         exist_ok = bool(body.get("exist_ok"))
         dest = guards.validate_mkdir(guards.to_real(parent), name, exist_ok=exist_ok)
+        rel = self._seedbox_rel(dest)
+        if rel is not None:
+            # No local directory to stat, so "did it already exist?" is a listing
+            # away. `rclone mkdir` is idempotent, which is why the answer has to be
+            # worked out BEFORE creating rather than from the exit code.
+            try:
+                existing = {e.get("Name") for e in seedbox.lsjson(os.path.dirname(rel))
+                            if e.get("IsDir")}
+            except seedbox.SeedboxError as exc:
+                return self._fail(502, f"seedbox: {exc}")
+            created = os.path.basename(rel) not in existing
+            if not created and not exist_ok:
+                raise JobError(f"{name} already exists here")
+            if created:
+                try:
+                    seedbox.mkdir(rel)
+                except seedbox.SeedboxError as exc:
+                    return self._fail(502, f"seedbox: {exc}")
+                self.log(f"created seedbox folder {guards.to_virtual(dest)}")
+            return self._send(201 if created else 200,
+                              {"path": guards.to_virtual(dest), "created": created})
         created = not os.path.isdir(dest)
         if created:
             os.mkdir(dest)

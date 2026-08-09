@@ -171,6 +171,20 @@ is no `rclone.conf` to maintain.
   rather than being final, which is what stands in for the depth guard the relay
   applies to its own volumes. Search on the Mac side is Spotlight, so it answers
   in milliseconds instead of walking from `/`.
+- **Uploads.** The remote server is a destination as well as a source, so either
+  pane can be any of the three and Send goes whichever way you point it. A folder
+  keeps its shape on arrival, and New Folder works on the remote side too.
+  From the NAS it is an ordinary relay job — it survives quitting, and gets retry
+  and the log like any other. From this Mac it streams up through the relay, which
+  pipes it straight to the remote server rather than staging it on the NAS disk.
+  One caveat stated rather than hidden: a Mac-side upload overwrites what is
+  already there instead of asking, because the "what is already at the
+  destination" scan reads a local filesystem and the remote server is not one.
+- **Resumable reads.** `GET /v1/fetch` honours `Range: bytes=N-` and answers 206,
+  seeking on the NAS side and passing the offset to rclone on the remote side, so
+  a dropped connection on a large pull continues instead of starting over. Only
+  the single open-ended form is accepted; anything else is refused rather than
+  quietly served whole, which would corrupt the file being appended to.
 - **Listings refresh themselves** when there is a reason to. A finished transfer
   reloads the destination pane if that is the folder you are looking at, so the
   file appears where you are watching for it rather than after a manual refresh.

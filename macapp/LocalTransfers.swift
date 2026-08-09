@@ -44,15 +44,17 @@ final class LocalTransfers: NSObject, ObservableObject {
     @discardableResult
     func send(src: String, srcName: String, destDir: String,
               destName: String? = nil,
-              onConflict: ConflictAction? = nil) -> LocalJob? {
+              onConflict: ConflictAction? = nil,
+              direction: LocalJob.Direction = .download) -> LocalJob? {
         let name = destName ?? srcName
         let landing = (destDir as NSString).appendingPathComponent(name)
         guard !active.contains(where: { $0.src == src && $0.dest == landing }) else {
             return nil
         }
-        let job = LocalJob(id: nextID, src: src, srcName: srcName,
+        var job = LocalJob(id: nextID, src: src, srcName: srcName,
                            dest: landing, destDir: destDir,
                            onConflict: onConflict)
+        job.direction = direction
         nextID -= 1
         jobs.insert(job, at: 0)
         Task { await drain() }
@@ -100,7 +102,7 @@ final class LocalTransfers: NSObject, ObservableObject {
         guard let old = jobs.first(where: { $0.id == id }) else { return }
         send(src: old.src, srcName: old.srcName, destDir: old.destDir,
              destName: (old.dest as NSString).lastPathComponent,
-             onConflict: old.onConflict)
+             onConflict: old.onConflict, direction: old.direction)
     }
 
     // ---------- the worker ----------
@@ -125,6 +127,7 @@ final class LocalTransfers: NSObject, ObservableObject {
     private func run(_ id: Int) async {
         guard let job = jobs.first(where: { $0.id == id }) else { return }
         update(id) { $0.state = .running; $0.startedAt = Date().timeIntervalSince1970 }
+        if job.direction == .upload { return await runUpload(id, job) }
 
         // 1. What is this made of?
         let manifest: Manifest
@@ -193,6 +196,78 @@ final class LocalTransfers: NSObject, ObservableObject {
             }
         }
         finish(id, .done, error: nil)
+    }
+
+    /// Push a local file or folder up through the relay.
+    ///
+    /// No manifest call: the source is on this disk, so the file list comes from
+    /// `FileManager` directly. Otherwise the shape matches `run` exactly -- one
+    /// request per file, one retry on a dropped connection, and the same progress
+    /// accounting -- because the Transfers pane renders both from the same row.
+    private func runUpload(_ id: Int, _ job: LocalJob) async {
+        let files: [(local: URL, rel: String, size: Int64)]
+        do {
+            files = try Self.localFiles(at: job.src)
+        } catch {
+            return finish(id, .failed, error: LocalBackend.explain(error, doing: "read that"))
+        }
+        guard !files.isEmpty else { return finish(id, .failed, error: "Nothing to transfer") }
+        let isDir = files.count > 1 || files.first?.rel != (job.src as NSString).lastPathComponent
+        update(id) {
+            $0.bytesTotal = files.reduce(0) { $0 + $1.size }
+            $0.filesTotal = files.count
+        }
+
+        var done: Int64 = 0
+        for (i, file) in files.enumerated() {
+            if cancelled.contains(id) { return finish(id, .cancelled, error: nil) }
+            // The remote path mirrors the local shape underneath the destination,
+            // the same way a download rebuilds a folder underneath its target.
+            let remote = isDir
+                ? (job.dest as NSString).appendingPathComponent(file.rel)
+                : job.dest
+            let base = done
+            var outcome = await api.upload(file: file.local, to: remote) { sent in
+                Task { @MainActor in self.update(id) { $0.bytesDone = base + sent } }
+            }
+            if case .unreachable = outcome, !cancelled.contains(id) {
+                update(id) { $0.bytesDone = base }
+                outcome = await api.upload(file: file.local, to: remote) { sent in
+                    Task { @MainActor in self.update(id) { $0.bytesDone = base + sent } }
+                }
+            }
+            switch outcome {
+            case .ok:
+                done += file.size
+                update(id) { $0.bytesDone = done; $0.filesDone = i + 1 }
+            case .refused(let why), .unreachable(let why):
+                return finish(id, cancelled.contains(id) ? .cancelled : .failed, error: why)
+            }
+        }
+        finish(id, .done, error: nil)
+    }
+
+    /// A local path flattened to its files, the local answer to `/v1/manifest`.
+    private static func localFiles(at path: String) throws -> [(local: URL, rel: String, size: Int64)] {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let url = URL(fileURLWithPath: path)
+        if !isDir.boolValue {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return [(url, url.lastPathComponent, Int64(size))]
+        }
+        var out: [(URL, String, Int64)] = []
+        let e = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+        while let next = e?.nextObject() as? URL {
+            let v = try? next.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard v?.isRegularFile == true else { continue }
+            let rel = String(next.path.dropFirst(path.count).drop(while: { $0 == "/" }))
+            out.append((next, rel, Int64(v?.fileSize ?? 0)))
+        }
+        return out.sorted { $0.1.localizedStandardCompare($1.1) == .orderedAscending }
     }
 
     private enum Decision { case proceed(String); case skip; case stop(String) }
@@ -307,6 +382,7 @@ final class LocalTransfers: NSObject, ObservableObject {
 /// One transfer onto this Mac.
 struct LocalJob: Identifiable, Equatable {
     enum State: String { case queued, running, done, failed, cancelled }
+    enum Direction { case download, upload }
 
     let id: Int
     let src: String
@@ -315,6 +391,9 @@ struct LocalJob: Identifiable, Equatable {
     let dest: String
     let destDir: String
     let onConflict: ConflictAction?
+    /// Which way the bytes go. `.download` pulls from the relay onto this Mac;
+    /// `.upload` pushes a local file up to the NAS or the seedbox through it.
+    var direction: Direction = .download
 
     var state: State = .queued
     var bytesDone: Int64 = 0
@@ -330,7 +409,9 @@ struct LocalJob: Identifiable, Equatable {
         bytesTotal > 0 ? min(1, Double(bytesDone) / Double(bytesTotal)) : 0
     }
     /// Shown on every local row. See the type comment on `LocalTransfers`.
-    var note: String { "on this Mac — stops if Shuttle quits" }
+    var note: String {
+        (direction == .upload ? "from this Mac" : "on this Mac") + " — stops if Shuttle quits"
+    }
 }
 
 /// What `/v1/manifest` answers: a path flattened to the files it contains.

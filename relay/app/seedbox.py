@@ -270,6 +270,43 @@ def walk_all(rel: str = "", timeout: int = 180) -> list:
         raise SeedboxError("could not parse the seedbox listing")
 
 
+def size_of(rel: str, timeout: int = 60):
+    """Bytes for ONE remote file, or None if it is not a file.
+
+    `lsjson --stat` is a single round trip (~0.4s over FTP), which is why nothing
+    in the normal fetch path calls it -- a fifty-file release would pay it fifty
+    times for something the manifest already said. It exists for Range resume,
+    where a correct `Content-Range` needs the total and one extra round trip is
+    nothing against restarting a 60 GB download.
+    """
+    if not configured():
+        raise SeedboxError("seedbox is not configured yet — set it in Settings")
+    p = subprocess.run(["rclone", "lsjson", "--stat", remote_path(rel)],
+                       capture_output=True, text=True, timeout=timeout, env=env())
+    if p.returncode != 0:
+        msg = (p.stderr or "").strip().splitlines()
+        raise SeedboxError(msg[-1] if msg else f"rclone exit {p.returncode}")
+    try:
+        item = json.loads(p.stdout or "null")
+    except ValueError:
+        raise SeedboxError("could not parse the seedbox listing")
+    if not item or item.get("IsDir"):
+        return None
+    return int(item.get("Size") or 0)
+
+
+def mkdir(rel: str, timeout: int = 60) -> None:
+    """Create a directory on the remote. Idempotent -- `rclone mkdir` succeeds on
+    one that already exists, so the caller decides what "created" means."""
+    if not configured():
+        raise SeedboxError("seedbox is not configured yet — set it in Settings")
+    p = subprocess.run(["rclone", "mkdir", remote_path(rel)],
+                       capture_output=True, text=True, timeout=timeout, env=env())
+    if p.returncode != 0:
+        msg = (p.stderr or "").strip().splitlines()
+        raise SeedboxError(msg[-1] if msg else f"rclone exit {p.returncode}")
+
+
 def walk_files(rel: str, timeout: int = 300) -> list:
     """Every file under a remote path, as [{"path": relative, "size": int}].
 

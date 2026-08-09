@@ -27,11 +27,48 @@ enum TokenStore {
     private static var cached: String?
     private static var primed = false
 
-    private static var fileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask)[0]
+    private static var supportDir: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory,
+                                 in: .userDomainMask)[0]
             .appendingPathComponent("Shuttle", isDirectory: true)
-        return base.appendingPathComponent("token")
+    }
+
+    private static var fileURL: URL { supportDir.appendingPathComponent("token") }
+
+    /// Where the relay's address is published for other tools on this Mac.
+    private static var relayFileURL: URL { supportDir.appendingPathComponent("relay.json") }
+
+    /// Publish the relay's base URL beside the token, so a companion app can find
+    /// the relay without being configured separately.
+    ///
+    /// Same 0600/0700 treatment as the token: it is not a secret in the way the
+    /// token is, but it sits in the same directory and anything reading one reads
+    /// the other, so there is no reason to make it looser. Written whenever the
+    /// address is saved OR merely confirmed to work, since a build with a baked-in
+    /// default never goes through the save path at all.
+    static func publishRelayBase(_ base: String) {
+        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: supportDir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        guard let body = try? JSONSerialization.data(
+                withJSONObject: ["base_url": trimmed],
+                // withoutEscapingSlashes: valid JSON either way, but a URL written
+                // as http:\/\/host is unreadable in a file someone may open by hand.
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        else { return }
+        // Rewriting an identical file would churn its mtime on every launch, which
+        // a watcher on the other side would see as a change.
+        if let existing = try? Data(contentsOf: relayFileURL),
+           (try? JSONSerialization.jsonObject(with: existing)) as? [String: String]
+               == ["base_url": trimmed] {
+            return
+        }
+        fm.createFile(atPath: relayFileURL.path, contents: body,
+                      attributes: [.posixPermissions: 0o600])
+        try? fm.setAttributes([.posixPermissions: 0o600],
+                              ofItemAtPath: relayFileURL.path)
     }
 
     /// Kept for API compatibility with the Keychain version; nothing consults it now.

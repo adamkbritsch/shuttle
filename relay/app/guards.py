@@ -84,6 +84,33 @@ def drop_targets():
         return set()
 
 
+def validate_upload(real: str) -> str:
+    """A path that may be WRITTEN, as the destination of an upload.
+
+    Both trees are allowed -- the seedbox stopped being read-only when uploads
+    arrived, and the Mac needs somewhere on the NAS to put things too.
+
+    The depth rule is the one thing that carries over from the read-only days: a
+    file may not be dropped at `/queue` (that is the volume LIST, not a volume) or
+    at the seedbox root, because in both cases the thing being named is a
+    container rather than a place. Overwriting is allowed -- the app asks about a
+    clash before it gets here, exactly as it does for a transfer.
+    """
+    norm = os.path.normpath(real)
+    parent = os.path.dirname(norm)
+    if under(norm, SEEDBOX):
+        if os.path.normpath(parent) == SEEDBOX:
+            raise JobError("upload into a folder on the seedbox, not the seedbox itself")
+        return norm
+    if under(norm, QUEUE):
+        if os.path.normpath(parent) == QUEUE:
+            raise JobError("/queue is the list of volumes -- upload into one of them")
+        if resolve_drop_target(norm) is None:
+            raise JobError(f"{to_virtual(norm)} is not inside a destination volume")
+        return norm
+    raise JobError("that path is not inside anything this relay serves")
+
+
 def validate_fetch(real: str) -> str:
     """A path whose BYTES may be read out over HTTP.
 
@@ -195,6 +222,35 @@ def validate_request(src: str, dest_dir: str, dest_name: str):
     return src, dest_dir, dest_name
 
 
+def validate_push(src: str, dest_dir: str, dest_name: str):
+    """The gate for a transfer going the other way: NAS -> seedbox.
+
+    Deliberately NOT folded into `validate_request`. That function's check ORDER is
+    load-bearing -- tests/ftp_regression.py diffs the exact 550 strings a FileZilla
+    user gets, and reordering or adding a branch there would change them. This is a
+    separate door for a direction the FTP front end cannot even ask for.
+    """
+    src = os.path.normpath(src)
+    dest_dir = os.path.normpath(dest_dir)
+
+    if under(src, SEEDBOX):
+        raise JobError("both ends are the seedbox -- that is not a transfer")
+    if resolve_drop_target(src) is None:
+        raise JobError(f"{to_virtual(src)} is not somewhere this can send from")
+    if not os.path.exists(src):
+        raise JobError(f"no such item: {to_virtual(src)}")
+    # A whole volume is a level of the library, not a thing to upload -- the same
+    # judgement reject_whole_library makes about the seedbox side.
+    if resolve_drop_target(src) == src:
+        raise JobError("that is a whole volume, not something inside one")
+    if not under(dest_dir, SEEDBOX) or os.path.normpath(dest_dir) == SEEDBOX:
+        raise JobError("send into a folder on the seedbox")
+    if (dest_name in _BAD_NAME or "/" in dest_name
+            or any(ord(c) < 32 for c in dest_name)):
+        raise JobError("destination name must be a single path component")
+    return src, dest_dir, dest_name
+
+
 def validate_delete(path: str, require_exists: bool = True) -> str:
     """Gate for deleting something that landed on the NAS.
 
@@ -289,7 +345,14 @@ def validate_mkdir(parent: str, name: str, exist_ok: bool = False) -> str:
     par = os.path.normpath(parent)
 
     if under(par, SEEDBOX):
-        raise JobError("the seedbox is read-only -- create folders on the NAS side")
+        # Writable since uploads exist. Only the DEPTH check applies -- there is no
+        # local directory to stat, because the seedbox is reached over rclone and
+        # not through a mount. `api._mkdir` performs it with `rclone mkdir`.
+        if os.path.normpath(par) == SEEDBOX:
+            raise JobError("that is the seedbox itself, not a folder on it")
+        if (name in _BAD_NAME or "/" in name or any(ord(c) < 32 for c in name)):
+            raise JobError("the folder name must be a single path component")
+        return os.path.join(par, name)
     if resolve_drop_target(par) is None:
         raise JobError(f"{to_virtual(par)} is not somewhere this can create folders")
     if not os.path.isdir(par):

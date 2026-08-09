@@ -248,6 +248,29 @@ class Jobs:
         rel = real_path[len(SEEDBOX_MOUNT):].lstrip("/")
         return RCLONE_REMOTE + "/" + rel
 
+    @staticmethod
+    def dest_is_remote(dest_dir: str) -> bool:
+        """Is this job PUSHING to the seedbox rather than pulling from it?
+
+        The direction is derivable from the paths alone, so nothing new is stored:
+        a destination under the seedbox mount means rclone's arguments swap ends.
+        """
+        return os.path.normpath(dest_dir).startswith(SEEDBOX_MOUNT)
+
+    @classmethod
+    def rclone_ends(cls, src_real: str, dest_dir: str, dest_name: str):
+        """(source, destination) as rclone should see them, for either direction.
+
+        Exactly one end is ever remote. A pull reads `seedbox:X` and writes a real
+        path; a push reads a real path and writes `seedbox:X`. Everything else about
+        the command -- the verb, the flags, the stats parsing -- is identical, which
+        is why the direction lives here and nowhere else.
+        """
+        target = os.path.join(dest_dir, dest_name)
+        if cls.dest_is_remote(dest_dir):
+            return src_real, cls.to_remote(target)
+        return cls.to_remote(src_real), target
+
     # ---------- queue ----------
 
     def enqueue(self, src_real: str, dest_dir: str, dest_name: str,
@@ -311,6 +334,11 @@ class Jobs:
         # sees it in FileZilla's message log straight away instead of finding a
         # failure in _done five minutes later. /volume2 runs at 94%.
         try:
+            if self.dest_is_remote(dest_dir):
+                # There is no local filesystem to ask, and statvfs on the mount
+                # point would answer for the WRONG volume -- silently refusing a
+                # push because the NAS is full, when the NAS is not the target.
+                raise OSError("remote destination")
             st = os.statvfs(dest_dir)
             free = st.f_bavail * st.f_frsize
             if size and size > free * 0.98:
@@ -348,7 +376,8 @@ class Jobs:
                 "INSERT INTO jobs (src_real,src_remote,dest_dir,dest_name,is_dir,"
                 "bytes_total,dest_preexisted,on_conflict,replace_path,created_at,"
                 "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (src_real, self.to_remote(src_real), dest_dir, dest_name,
+                (src_real, self.rclone_ends(src_real, dest_dir, dest_name)[0],
+                 dest_dir, dest_name,
                  int(is_dir), size, dest_preexisted,
                  on_conflict if on_conflict in CONFLICT_FLAGS else "overwrite",
                  replace_path or None, now, now))
@@ -691,13 +720,15 @@ class Jobs:
         if job is None or job["state"] not in ("queued",):
             return
 
-        dest = os.path.join(job["dest_dir"], job["dest_name"])
+        # Exactly one end is remote, and which one is the direction of this job.
+        src_end, dest = self.rclone_ends(job["src_real"], job["dest_dir"],
+                                         job["dest_name"])
         # `rclone copy SRCDIR DSTDIR` copies SRCDIR's *contents* into DSTDIR, so
         # for a directory the basename must be repeated on the destination or a
         # torrent folder dumps loose files straight into the volume root.
         verb = "copy" if job["is_dir"] else "copyto"
         cmd = [
-            "rclone", verb, job["src_remote"], dest,
+            "rclone", verb, src_end, dest,
             "--use-json-log", "--stats", "1s",
             # MANDATORY: rclone emits stats at INFO but defaults to NOTICE, so
             # without this the parser below sees zero progress records.

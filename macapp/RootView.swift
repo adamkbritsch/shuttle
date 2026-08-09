@@ -543,9 +543,12 @@ struct RootView: View {
     /// destination is the Mac — with the NAS on the right, a NAS source would mean
     /// NAS-to-NAS, which is what Move already is, so the control would be inert.
     private func backendChoices(for pane: BrowseStore) -> [FileBackend] {
-        if pane === dest { return [store.nasBackend, store.macBackend] }
-        guard dest.kind == .mac else { return [] }
-        return [store.seedboxBackend, store.nasBackend]
+        let all: [FileBackend] = [store.seedboxBackend, store.nasBackend, store.macBackend]
+        // Never offer the filesystem the OTHER pane is on: same-to-same is not a
+        // transfer, it is Move, which has its own menu item and does not need a
+        // second pane. Anything left with one choice hides its picker entirely.
+        let other = (pane === dest ? seedbox : dest).kind
+        return all.filter { $0.kind != other }
     }
 
     /// Point a pane — listing, tree and search together — at another filesystem.
@@ -560,13 +563,17 @@ struct RootView: View {
         search.switchTo(next)
         Task {
             await pane.switchTo(next)
-            // Leaving the Mac takes the source's choice away with it, so a NAS source
-            // would otherwise be stranded pointing at the same filesystem as the
-            // destination.
-            if pane === dest, next.kind == .nas, seedbox.kind == .nas {
-                sourceTree.switchTo(store.seedboxBackend)
-                sourceSearch.switchTo(store.seedboxBackend)
-                await seedbox.switchTo(store.seedboxBackend)
+            // Both panes may not sit on the same filesystem. Whichever side was NOT
+            // just changed gives way, moving to the first choice that is still free.
+            let others = pane === dest
+                ? (other: seedbox, tree: sourceTree, search: sourceSearch)
+                : (other: dest, tree: destTree, search: search)
+            if others.other.kind == next.kind {
+                let fallback: FileBackend = next.kind == .seedbox
+                    ? store.nasBackend : store.seedboxBackend
+                others.tree.switchTo(fallback)
+                others.search.switchTo(fallback)
+                await others.other.switchTo(fallback)
             }
         }
     }
@@ -697,17 +704,30 @@ struct RootView: View {
     private func queueOne(path: String, name: String, destDir: String,
                           onConflict: ConflictAction?,
                           destName: String? = nil) async -> ConflictReport? {
-        guard dest.kind == .mac else {
-            return await store.send(src: path, destDir: destDir,
-                                    onConflict: onConflict, destName: destName)
+        // Downloading ONTO the Mac: this app pulls, because the relay cannot write
+        // here.
+        if dest.kind == .mac {
+            if onConflict == nil,
+               let report = local.clash(for: name, in: destDir, destName: destName) {
+                return report
+            }
+            local.send(src: path, srcName: name, destDir: destDir,
+                       destName: destName, onConflict: onConflict,
+                       direction: .download)
+            return nil
         }
-        if onConflict == nil,
-           let report = local.clash(for: name, in: destDir, destName: destName) {
-            return report
+        // Uploading FROM the Mac: this app pushes, because the relay cannot read
+        // this disk. The clash question goes to the relay, which is the side that
+        // knows what is already there.
+        if seedbox.kind == .mac {
+            local.send(src: path, srcName: name, destDir: destDir,
+                       destName: destName, onConflict: onConflict,
+                       direction: .upload)
+            return nil
         }
-        local.send(src: path, srcName: name, destDir: destDir,
-                   destName: destName, onConflict: onConflict)
-        return nil
+        // Both ends are the relay's, so it moves the bytes itself.
+        return await store.send(src: path, destDir: destDir,
+                                onConflict: onConflict, destName: destName)
     }
 
     /// Applies the sheet's answer to the item that tripped it, then continues with

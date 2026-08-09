@@ -33,6 +33,9 @@ final class RelayStore: ObservableObject {
         didSet {
             UserDefaults.standard.set(baseURL, forKey: "relay.base")
             Task { await api.setBase(baseURL) }
+            // Published for companion tools the moment it is saved -- see
+            // TokenStore.publishRelayBase.
+            TokenStore.publishRelayBase(baseURL)
         }
     }
 
@@ -94,7 +97,12 @@ final class RelayStore: ObservableObject {
 
     func refreshStatus() async {
         switch await api.probe() {
-        case .ok(let h): status = .live(h)
+        case .ok(let h):
+            status = .live(h)
+            // A build with SHUTTLE_RELAY_HOST baked in never goes through the save
+            // path, so publishing only on save would leave the file missing on
+            // exactly the installs that never needed to configure anything.
+            TokenStore.publishRelayBase(baseURL)
         case .unauthorized: status = .offline(.unauthorized)
         case .unreachable(let why): status = .offline(.unreachable(why))
         }
