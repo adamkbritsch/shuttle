@@ -100,6 +100,9 @@ struct RootView: View {
             TopBar(store: store, onSettings: { showSettings = true },
                    onRefresh: { Task { await refreshAll() } })
             Divider().overlay(Theme.hairline)
+            if let missing = setupGap {
+                SetupCard(missing: missing) { showSettings = true }
+            }
             content
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -576,6 +579,19 @@ struct RootView: View {
                 await others.other.switchTo(fallback)
             }
         }
+    }
+
+    /// What is still missing before Shuttle can do anything, or nil once it can.
+    ///
+    /// Derived from state the app already keeps current — the relay's live status
+    /// and the seedbox config the relay reports — rather than a second copy of the
+    /// Setup checks. A banner that needed its own probes would either be stale or
+    /// be probing constantly.
+    private var setupGap: String? {
+        let relayUp: Bool = { if case .live = store.status { return true }; return false }()
+        if !relayUp { return "Shuttle cannot reach the relay yet" }
+        if !store.seedbox.configured { return "The remote server has not been set up yet" }
+        return nil
     }
 
     private var actingPane: BrowseStore { actionPane ?? dest }
@@ -1237,126 +1253,58 @@ private struct SettingsSheet: View {
     @ObservedObject var store: RelayStore
     let close: () -> Void
 
+    @StateObject private var setup: SetupModel
     @State private var base = ""
     @State private var token = ""
-    @State private var loaded = false
     @State private var concurrent = 1
-    @State private var sbProtocol: SeedboxProtocol = .ftps
-    @State private var sbHost = ""
-    @State private var sbPort = "21"
-    @State private var sbUser = ""
-    @State private var sbPassword = ""
-    @State private var sbRoot = "/"
-    @State private var sbTesting = false
+    @State private var loaded = false
+
+    init(store: RelayStore, close: @escaping () -> Void) {
+        self.store = store
+        self.close = close
+        _setup = StateObject(wrappedValue: SetupModel(store: store))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Relay Settings").font(.system(size: 15, weight: .semibold))
-            Text("Shuttle drives the relay on the NAS. Transfers run entirely between the "
-                 + "seedbox and the NAS — nothing passes through this Mac.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 5)
+            Text("Shuttle Settings").font(.system(size: 15, weight: .semibold))
+            Text("Shuttle drives a relay on the NAS. Transfers between the remote "
+                 + "server and the NAS run entirely between those two machines; only "
+                 + "transfers to or from this Mac pass through it.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true).padding(.top, 5)
 
-            Divider().padding(.vertical, 16)
+            Divider().padding(.vertical, 14)
 
-            Text("Address").font(.system(size: 12, weight: .medium))
-            TextField("", text: $base)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-            Text("Tailnet only. Plain HTTP is fine — the link is WireGuard-encrypted.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.top, 3)
-
-            Text("API token").font(.system(size: 12, weight: .medium)).padding(.top, 14)
-            SecureField("", text: $token)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-            Text(tokenBlurb)
-                .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.top, 3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider().padding(.vertical, 16)
-
-            HStack(spacing: 8) {
-                Text("Seedbox").font(.system(size: 12, weight: .medium))
-                Circle()
-                    .fill(store.seedbox.configured ? Color(nsColor: .systemGreen)
-                                                   : Color(nsColor: .systemOrange))
-                    .frame(width: 7, height: 7)
-                Text(store.seedbox.configured ? "connected" : "not configured yet")
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                Spacer()
-            }
-            Text("The NAS connects to the seedbox directly and copies server-to-server. "
-                 + "These credentials are stored on the NAS, never on this Mac.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
-
-            HStack(spacing: 8) {
-                Picker("", selection: $sbProtocol) {
-                    ForEach(SeedboxProtocol.allCases) { p in Text(p.label).tag(p) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    SetupSection(store: store, model: setup, base: $base, token: $token)
+                    Divider().padding(.vertical, 16)
+                    transfersGroup
                 }
-                .labelsHidden().fixedSize()
-                .onChange(of: sbProtocol) { _, p in sbPort = String(p.defaultPort) }
-                TextField("host.example.com", text: $sbHost)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                TextField("port", text: $sbPort)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(width: 62)
+                .padding(.trailing, 2)
             }
-            .padding(.top, 8)
+            .frame(maxHeight: 520)
 
-            HStack(spacing: 8) {
-                TextField("username", text: $sbUser)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                SecureField(store.seedbox.hasPassword ? "password (unchanged)" : "password",
-                            text: $sbPassword)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            .padding(.top, 6)
-
-            HStack(spacing: 8) {
-                Text("Remote path").font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("/", text: $sbRoot)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            .padding(.top, 6)
-            Text("The directory on the seedbox to browse from. Leave as / unless your "
-                 + "provider drops you somewhere other than your downloads folder.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
-
-            HStack(spacing: 8) {
-                Button(sbTesting ? "Testing…" : "Test & Save Seedbox") {
-                    sbTesting = true
-                    Task {
-                        _ = await store.saveSeedbox(
-                            protocolName: sbProtocol.rawValue,
-                            host: sbHost.trimmingCharacters(in: .whitespaces),
-                            port: Int(sbPort) ?? sbProtocol.defaultPort,
-                            user: sbUser.trimmingCharacters(in: .whitespaces),
-                            password: sbPassword, root: sbRoot.isEmpty ? "/" : sbRoot)
-                        sbPassword = ""
-                        sbTesting = false
-                    }
-                }
-                .disabled(sbTesting || sbHost.isEmpty || sbUser.isEmpty
-                          || (!store.seedbox.hasPassword && sbPassword.isEmpty))
-                if sbTesting { ProgressView().controlSize(.small) }
+            Divider().padding(.vertical, 14)
+            HStack {
                 Spacer()
+                Button("Done", action: close).keyboardShortcut(.defaultAction)
             }
-            .padding(.top, 10)
-            Text("Saving tests the connection from the NAS before it is trusted.")
-                .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.top, 3)
+        }
+        .padding(22)
+        .frame(width: 500)
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            base = store.baseURL
+            concurrent = store.maxConcurrent
+            Task { await store.loadSeedbox() }
+        }
+    }
 
-            Divider().padding(.vertical, 16)
-
+    private var transfersGroup: some View {
+        VStack(alignment: .leading, spacing: 7) {
             Text("Simultaneous transfers").font(.system(size: 12, weight: .medium))
             HStack(spacing: 10) {
                 Stepper(value: $concurrent, in: 1...max(1, store.maxConcurrentCeiling)) {
@@ -1367,61 +1315,19 @@ private struct SettingsSheet: View {
                 .fixedSize()
                 Text("of \(store.maxConcurrentCeiling) max")
                     .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                Button("Apply") {
+                    Task { await store.setMaxConcurrent(concurrent) }
+                }
+                .disabled(concurrent == store.maxConcurrent)
                 Spacer()
             }
-            Text("How many copies the NAS runs at once. Raising this does not "
-                 + "necessarily go faster — the seedbox link is usually the limit, and "
+            Text("How many copies the relay runs at once. Raising this does not "
+                 + "necessarily go faster — the remote link is usually the limit, and "
                  + "parallel copies mostly divide it. Lowering it takes effect as "
                  + "running transfers finish; nothing is interrupted.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.top, 3)
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            Divider().padding(.vertical, 16)
-
-            HStack {
-                Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                Button("Save & Test") {
-                    store.baseURL = base
-                    Task {
-                        if !token.isEmpty { await store.saveToken(token) }
-                        else { await store.refreshStatus() }
-                        if concurrent != store.maxConcurrent {
-                            await store.setMaxConcurrent(concurrent)
-                        }
-                        close()
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-            }
         }
-        .padding(22)
-        .frame(width: 470)
-        .onAppear {
-            guard !loaded else { return }
-            loaded = true
-            base = store.baseURL
-            concurrent = store.maxConcurrent
-            // Seed from whatever the relay reports, so the form shows the live
-            // configuration rather than blanks. The password is never sent back.
-            sbProtocol = SeedboxProtocol(rawValue: store.seedbox.protocolName) ?? .ftps
-            sbHost = store.seedbox.host
-            sbPort = String(store.seedbox.port)
-            sbUser = store.seedbox.user
-            sbRoot = store.seedbox.root
-            Task { await store.loadSeedbox() }
-        }
-        .onChange(of: store.seedbox) { _, c in
-            guard !c.host.isEmpty, sbHost.isEmpty else { return }
-            sbProtocol = SeedboxProtocol(rawValue: c.protocolName) ?? .ftps
-            sbHost = c.host; sbPort = String(c.port); sbUser = c.user; sbRoot = c.root
-        }
-    }
-
-    private var tokenBlurb: String {
-        TokenStore.current == nil
-            ? "RELAY_API_TOKEN from the NAS .env. Saved to a private file in Application Support, readable only by you."
-            : "A token is saved. Leave blank to keep it; type a new one to replace it."
     }
 }
 

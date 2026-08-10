@@ -53,17 +53,37 @@ verb is to **come home**.
   reports progress. Also exposes an optional FTP front end, so FileZilla itself
   can drive the same queue if you'd rather.
 
-## Requirements
+## Install
 
-- A NAS that runs Docker. The relay image installs `rclone` itself.
-- macOS 14 or later to run the app; Xcode's command line tools to build it.
-- A private network path from the Mac to the NAS. Tailscale is what this was built
-  against; any VPN or plain LAN works. **Do not expose the relay to the internet** —
-  it writes into your volumes.
+**1. Download and unzip.** Grab `Shuttle-vX.Y.Z.zip` from
+[Releases](https://github.com/adamkbritsch/shuttle/releases) and unzip it.
 
-## Setup
+**2. Drag `Shuttle.app` to `/Applications`. This is required, not tidiness.**
+macOS App Translocation runs a quarantined app from a randomised, read-only path
+when it is opened anywhere else — Downloads included. Moving it out of quarantine
+by putting it in `/Applications` is what stops that.
 
-### 1. The relay
+**3. Right-click it and choose Open**, once. The app is signed but not notarised,
+so double-clicking gets refused the first time; Open from the context menu offers
+the "open anyway" button. After that it launches normally.
+
+**4. Do the rest inside the app.** Shuttle opens with a **Setup** panel that walks
+through every field it needs, each with a live check beside it:
+
+| | |
+|---|---|
+| **Relay connection** | Address and API token. **Find my relay** sweeps this network for one, so an address you do not know is not a dead end. **Save & Test** proves both halves separately — whether anything answered, and whether it accepted the token. |
+| **Remote server** | The credentials the *relay* uses. They are stored on the NAS and never sent back; the app only ever learns whether a password is set. **Save & Test** runs a real listing rather than a ping. |
+| **Relay on the NAS** | The one part that cannot be done from here, as a numbered checklist with a copy button per command and a re-check that turns green once the relay answers. |
+| **Destinations** | The volumes the relay reports, so you can see where transfers can land before sending one. |
+
+The panel stays open until everything passes and collapses afterwards, and a
+**Finish setting up** banner sits on the main window until then.
+
+### The relay, on the NAS
+
+This is step 3 of the panel, reproduced here for anyone who would rather read it
+first. The relay is a container; the app cannot install it remotely.
 
 ```bash
 git clone https://github.com/adamkbritsch/shuttle.git
@@ -71,36 +91,52 @@ cd shuttle/relay
 cp .env.example .env
 ```
 
-Edit `.env`: set `RELAY_API_TOKEN` to a fresh secret, point `RELAY_API_BIND` at
-your NAS's private address, and set `DEST_1` to a directory you want to copy into.
+Fill in `.env`. Every key needs a value of your choosing — there are no defaults
+and none are printed here:
+
+| Key | What it is |
+|---|---|
+| `RELAY_API_TOKEN` | A fresh secret. With no token the HTTP API does not start at all, deliberately. |
+| `RELAY_API_BIND` | The NAS's private address. **Never `0.0.0.0`** — the relay writes into your volumes. |
+| `FTP_BIND_ADDR` | Same, for the FTP front end. |
+| `PUID` / `PGID` | The owner transfers should land as. |
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # a token
 docker compose up -d
+curl -s http://localhost:8789/healthz                           # should answer
 ```
 
-With no token the HTTP API does not start at all. That is deliberate.
+Credentials for the remote server are stored on the NAS in
+`relay/data/seedbox.json` (mode 0600, gitignored) and reach rclone as
+`RCLONE_CONFIG_*` environment variables, so there is no `rclone.conf` to maintain.
 
-### 2. The app
+### Building it yourself (development)
+
+Not needed to use Shuttle — the Release zip is the supported path.
 
 ```bash
-cd ../macapp
-./build.sh --install          # builds and installs to ~/Applications
+cd macapp
+./build.sh --install              # build, install to ~/Applications
+./build.sh --release 1.1.0        # build, stamp the version, zip into dist/
 ```
 
-Open Shuttle, then **Settings**:
+`--release` produces `dist/Shuttle-vX.Y.Z.zip` with `ditto -c -k --keepParent`,
+which preserves the code signature; a zip made any other way can arrive with a
+signature Gatekeeper refuses outright.
 
-- **Address** — `http://<nas-private-ip>:8789`
-- **API token** — the one from `.env`
-- **Remote server** — protocol, host, port, username, password
+`SHUTTLE_RELAY_HOST=<host> ./build.sh` bakes in a default address so a fresh
+install opens already pointing somewhere. It is optional — the app allows any
+host you configure at runtime, which is what makes a downloaded build usable by
+someone other than whoever built it.
 
-Saving those settings tests the connection *from the NAS*, because the NAS is the
-machine that has to reach the remote server. A successful test from your Mac
-would prove nothing about whether transfers will run.
+## Requirements
 
-Credentials are stored on the NAS in `relay/data/seedbox.json` (mode 0600,
-gitignored) and reach rclone as `RCLONE_CONFIG_*` environment variables, so there
-is no `rclone.conf` to maintain.
+- A NAS that runs Docker. The relay image installs `rclone` itself.
+- macOS 14 or later. Building additionally needs Xcode's command line tools.
+- A private network path from the Mac to the NAS. Tailscale is what this was built
+  against; any VPN or plain LAN works. **Do not expose the relay to the internet** —
+  it writes into your volumes.
 
 ## What it does
 

@@ -2,8 +2,10 @@
 # Build "Shuttle.app" — a native SwiftUI client for the seedbox->NAS relay's HTTP
 # API on the NAS.
 #
-#   ./build.sh              build only, into dist/
-#   ./build.sh --install    build, then install to ~/Applications
+#   ./build.sh                     build only, into dist/
+#   ./build.sh --install           build, then install to ~/Applications
+#   ./build.sh --release [X.Y.Z]   stamp the version, build, and zip for a
+#                                  GitHub Release into dist/Shuttle-vX.Y.Z.zip
 #
 # No Xcode project required — plain swiftc plus a hand-assembled bundle, matching the
 # two sibling apps. (Xcode.app IS used for one thing: actool, to compile the Icon
@@ -18,6 +20,15 @@ INSTALLED="${SHUTTLE_INSTALL_PATH:-$HOME/Applications/Shuttle.app}"
 BUNDLE_ID="${SHUTTLE_BUNDLE_ID:-com.britsch.shuttle}"
 EXEC_NAME="Shuttle"
 VERSION="1.0.0"
+
+# --release [version]: stamp the bundle with this version and produce the zip a
+# GitHub Release attaches. Parsed before anything else so VERSION is right by the
+# time Info.plist is written.
+RELEASE=0
+if [[ "${1:-}" == "--release" ]]; then
+  RELEASE=1
+  [[ -n "${2:-}" ]] && VERSION="${2#v}"
+fi
 # Optional. Bakes a default relay address into the build so a fresh install
 # opens already pointing at your NAS; otherwise set it in Settings.
 RELAY_HOST="${SHUTTLE_RELAY_HOST:-}"
@@ -64,7 +75,7 @@ echo "==> Compiling"
   "$SRC"/Backend.swift "$SRC"/LocalBackend.swift \
   "$SRC"/LocalTransfers.swift "$SRC"/Store.swift \
   "$SRC"/SplitTree.swift "$SRC"/DirTree.swift "$SRC"/FileTable.swift \
-  "$SRC"/BulkRename.swift "$SRC"/Search.swift "$SRC"/ConflictSheet.swift "$SRC"/BrowsePane.swift "$SRC"/Transfers.swift "$SRC"/RootView.swift \
+  "$SRC"/Setup.swift "$SRC"/BulkRename.swift "$SRC"/Search.swift "$SRC"/ConflictSheet.swift "$SRC"/BrowsePane.swift "$SRC"/Transfers.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework Security \
   -o "$TMP/$EXEC_NAME"
 
@@ -100,21 +111,31 @@ else
   echo "==> No icon step (needs Xcode.app for actool); continuing"
 fi
 
-# The relay is plain HTTP on a private address, so it needs an ATS exception --
-# without one the load fails with -1022. Exceptions are per-HOST, so there is
-# nothing to write unless a host was actually supplied, and shipping an empty
-# <key></key> would produce a malformed Info.plist.
+# The relay is plain HTTP on a private address, so ATS has to permit it -- without
+# permission the load fails with -1022 before any socket is opened, which surfaces
+# as "can't reach the relay" with nothing in lsof and nothing in the relay log.
 #
-# NOTE: typing the address into Settings is NOT a substitute. ATS is keyed on the
-# host in Info.plist and is decided before any socket is opened, so a build with
-# no host bakes in a binary that cannot reach a plain-HTTP relay at ANY address --
-# it fails silently as "can't reach the relay", with no connection attempt to find
-# in lsof and nothing in the relay's log. An HTTPS relay is unaffected.
-RELAY_KEYS=""
+# NSAllowsArbitraryLoads is set UNCONDITIONALLY, and that is a deliberate decision
+# for a distributable build rather than laziness. ATS exceptions are keyed on a
+# HOST baked into Info.plist at build time, so without this a downloaded release
+# could only ever talk to whatever address the person who built it happened to
+# use -- typing your own NAS into Settings would fail, and probing for one could
+# not work at all. Both are core to setup, so the alternative is not "a more
+# secure app", it is "an app nobody else can configure".
+#
+# What it costs is bounded: this app speaks to exactly one server, one the user
+# names themselves, on their own private network -- usually over WireGuard, which
+# is already encrypted underneath. ATS protects against passive interception of
+# public-internet HTTP, which is not the situation here.
+#
+# The per-host exception below is still emitted when a host is baked in, so that
+# configuration stays explicit and documented in the bundle.
+RELAY_KEYS="  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key><true/>"
 if [[ -n "$RELAY_HOST" ]]; then
   RELAY_KEYS="  <key>SHRelayBase</key><string>http://${RELAY_HOST}:8789</string>
-  <key>NSAppTransportSecurity</key>
-  <dict>
+${RELAY_KEYS}
     <key>NSExceptionDomains</key>
     <dict>
       <key>${RELAY_HOST}</key>
@@ -122,16 +143,14 @@ if [[ -n "$RELAY_HOST" ]]; then
         <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
         <key>NSIncludesSubdomains</key><false/>
       </dict>
-    </dict>
-  </dict>"
-  echo "==> Baking in relay host ${RELAY_HOST}"
+    </dict>"
+  echo "==> Baking in default relay host ${RELAY_HOST}"
 else
-  echo "==> WARNING: no SHUTTLE_RELAY_HOST set."
-  echo "    No ATS exception is baked in, so this build CANNOT reach a plain-HTTP"
-  echo "    relay -- setting the address in Settings will not help, and the app will"
-  echo "    just say it cannot reach the relay. Rebuild as:"
-  echo "        SHUTTLE_RELAY_HOST=<host> ./macapp/build.sh"
+  echo "==> No SHUTTLE_RELAY_HOST set; the app opens with an empty address and"
+  echo "    finds or accepts one in Setup."
 fi
+RELAY_KEYS="${RELAY_KEYS}
+  </dict>"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -211,6 +230,19 @@ echo "==> Built: $APP"
 
 # 4. Install, replacing whatever is there. The old bundle is only removed once the
 #    new one exists.
+if [[ "$RELEASE" == "1" ]]; then
+  ZIP="$DIST/Shuttle-v${VERSION}.zip"
+  rm -f "$ZIP"
+  # ditto, not `zip`: it preserves the bundle's symlinks, resource forks and --
+  # the load-bearing part -- the code signature. A zip built any other way can
+  # arrive with a broken signature that Gatekeeper refuses outright.
+  # --keepParent so the archive expands to Shuttle.app rather than its contents.
+  ditto -c -k --norsrc --keepParent "$APP" "$ZIP"
+  echo "==> Release zip: $ZIP ($(du -h "$ZIP" | cut -f1))"
+  echo "    Attach it with:"
+  echo "        gh release create v${VERSION} \"$ZIP\" --title \"Shuttle v${VERSION}\" --notes-file <notes>"
+fi
+
 if [[ "${1:-}" == "--install" ]]; then
   echo "==> Installing to $INSTALLED"
   rm -rf "$INSTALLED"

@@ -173,6 +173,41 @@ actor RelayAPI {
         }
     }
 
+    /// Tokenless `/healthz` against an ARBITRARY base URL.
+    ///
+    /// Static and self-contained because both callers need it before any relay is
+    /// configured: auto-discovery probes hundreds of candidates that have nothing
+    /// to do with the current instance, and the Test button has to tell "nothing is
+    /// there" apart from "something is there but rejected my token" — which needs
+    /// the unauthenticated answer first.
+    ///
+    /// Returns the service description on a hit, nil otherwise. `/healthz`
+    /// answering BEFORE auth is what makes this possible and is a contract other
+    /// tools depend on; do not put it behind the token.
+    nonisolated static func healthz(_ base: String,
+                                    timeout: TimeInterval = 4) async -> String? {
+        guard let root = normalize(base),
+              let url = URL(string: "healthz", relativeTo: root) else { return nil }
+        var r = URLRequest(url: url)
+        r.timeoutInterval = timeout
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = timeout
+        cfg.timeoutIntervalForResource = timeout
+        cfg.urlCache = nil
+        let session = URLSession(configuration: cfg)
+        defer { session.finishTasksAndInvalidate() }
+        guard let (data, resp) = try? await session.data(for: r),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200
+        else { return nil }
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        // Only a relay counts. Some other service answering 200 on :8789 would
+        // otherwise be reported as a find.
+        guard let service = obj?["service"] as? String else { return nil }
+        let host = root.host ?? base
+        return "\(service) at \(host)"
+    }
+
     /// Send one file's bytes to the relay, which writes them to `path`.
     ///
     /// `uploadTask(with:fromFile:)` rather than an in-memory body: the point of
