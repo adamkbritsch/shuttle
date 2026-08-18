@@ -279,4 +279,6 @@ extension Notification.Name {
     static let shuttleToggleQueue = Notification.Name("shuttle.toggleQueue")
     static let shuttleResetLayout = Notification.Name("shuttle.resetLayout")
     static let shuttleFind = Notification.Name("shuttle.find")
+    static let shuttleFavorites = Notification.Name("shuttle.favorites")
+    static let shuttleAddFavorite = Notification.Name("shuttle.addFavorite")
 }

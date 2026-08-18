@@ -153,6 +153,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               keyEquivalent: "f")
         find.target = self
         edit.addItem(find)
+        // Favorites sits beside Find because it answers the same question by the
+        // other route — a saved answer instead of a searched one.
+        let favs = NSMenuItem(title: "Favorites", action: #selector(showFavorites),
+                              keyEquivalent: "F")     // capital F == shift-command-F
+        favs.target = self
+        edit.addItem(favs)
+        let addFav = NSMenuItem(title: "Add This Folder to Favorites",
+                                action: #selector(addFavorite), keyEquivalent: "d")
+        addFav.target = self
+        edit.addItem(addFav)
         editItem.submenu = edit
         main.addItem(editItem)
 
@@ -217,6 +227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the `default: return true` below means a forgotten case ships permanently
         // enabled, which is exactly the bug this whole method was added to fix.
         case #selector(findOnNAS):    return MenuState.shared.flags.isLive
+        // Favorites is a LOCAL list, so it opens whether or not the relay answers —
+        // seeing what you saved is useful precisely when you cannot reach it.
+        case #selector(showFavorites): return true
+        case #selector(addFavorite):  return true
             case #selector(stopTransfer): return MenuState.shared.flags.hasSelectedTransfer
             default:                      return true
             }
@@ -228,6 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openSettings() { NotificationCenter.default.post(name: .shuttleSettings, object: nil) }
     @objc func refresh() { NotificationCenter.default.post(name: .shuttleRefresh, object: nil) }
     @objc func findOnNAS() { NotificationCenter.default.post(name: .shuttleFind, object: nil) }
+    @objc func showFavorites() { NotificationCenter.default.post(name: .shuttleFavorites, object: nil) }
+    @objc func addFavorite() { NotificationCenter.default.post(name: .shuttleAddFavorite, object: nil) }
     @objc func sendToNAS() { NotificationCenter.default.post(name: .shuttleSend, object: nil) }
     @objc func goUp() { NotificationCenter.default.post(name: .shuttleUp, object: nil) }
     @objc func stopTransfer() { NotificationCenter.default.post(name: .shuttleCancel, object: nil) }

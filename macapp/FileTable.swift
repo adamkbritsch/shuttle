@@ -92,6 +92,11 @@ struct FileTable: View {
     var onReplaceWith: (Entry) -> Void = { _ in }
     /// NAS side only: move these into a folder here, existing or new.
     var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    /// Whether a path is already saved, so the menu item can say which way it goes
+    /// rather than making you find out by clicking.
+    var isFavorite: (String) -> Bool = { _ in false }
+    var onToggleFavorite: (Entry) -> Void = { _ in }
+    var onFavoriteCurrentFolder: () -> Void = { }
     /// A row to scroll into view once it exists — how a picked search result is
     /// actually shown rather than merely selected.
     var reveal: String? = nil
@@ -369,6 +374,11 @@ struct FileTable: View {
                 }
             }
             if items.count == 1 { Divider() }
+            if items.count == 1, let e = items.first {
+                Button(isFavorite(e.path) ? "Remove from Favorites" : "Add to Favorites") {
+                    onToggleFavorite(e)
+                }
+            }
             Button(items.count == 1 ? "Copy Path" : "Copy \(items.count) Paths") {
                 copy(items.map(\.path))
             }
@@ -383,6 +393,9 @@ struct FileTable: View {
         if browse.canGoUp {
             Button("Enclosing Folder") { Task { await browse.goUp() } }
         }
+        Button(isFavorite(browse.path)
+               ? "Remove This Folder from Favorites"
+               : "Add This Folder to Favorites") { onFavoriteCurrentFolder() }
         Button("Copy Current Path") { copy([browse.path]) }
     }
 

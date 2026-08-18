@@ -75,7 +75,7 @@ echo "==> Compiling"
   "$SRC"/Backend.swift "$SRC"/LocalBackend.swift \
   "$SRC"/LocalTransfers.swift "$SRC"/Store.swift \
   "$SRC"/SplitTree.swift "$SRC"/DirTree.swift "$SRC"/FileTable.swift \
-  "$SRC"/Setup.swift "$SRC"/BulkRename.swift "$SRC"/Search.swift "$SRC"/ConflictSheet.swift "$SRC"/BrowsePane.swift "$SRC"/Transfers.swift "$SRC"/RootView.swift \
+  "$SRC"/Setup.swift "$SRC"/Favorites.swift "$SRC"/BulkRename.swift "$SRC"/Search.swift "$SRC"/ConflictSheet.swift "$SRC"/BrowsePane.swift "$SRC"/Transfers.swift "$SRC"/RootView.swift \
   -framework AppKit -framework SwiftUI -framework Security \
   -o "$TMP/$EXEC_NAME"
 

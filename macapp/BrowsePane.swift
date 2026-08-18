@@ -27,9 +27,17 @@ struct BrowsePane: View {
     var replacingName: String? = nil
     var onReplaceWith: (Entry) -> Void = { _ in }
     var onMoveToFolder: ([Entry]) -> Void = { _ in }
+    var isFavorite: (String) -> Bool = { _ in false }
+    var onToggleFavorite: (Entry) -> Void = { _ in }
+    var onFavoriteCurrentFolder: () -> Void = { }
     /// The filesystems this pane may be pointed at. Fewer than two hides the picker.
     var backends: [FileBackend] = []
     var onSwitch: (FileBackend) -> Void = { _ in }
+    /// nil leaves this pane exactly as it was before favorites existed.
+    var favorites: FavoritesStore? = nil
+    /// A VALUE, not read off `favorites`, for the same reason as `searchActive`.
+    var favoritesActive: Bool = false
+    var onPickFavorite: (Favorite) -> Void = { _ in }
     /// nil leaves this pane exactly as it was before search existed.
     var search: SearchStore? = nil
     /// Passed as a VALUE, not read off `search`. SwiftUI compares a view's stored
@@ -45,12 +53,15 @@ struct BrowsePane: View {
         VStack(alignment: .leading, spacing: 0) {
             PathBar(browse: browse, title: title,
                     backends: backends, onSwitch: onSwitch,
+                    favorites: favorites, favoritesActive: favoritesActive,
                     search: search, searchActive: searchActive)
             Divider().overlay(Theme.hairline)
             content
             Divider().overlay(Theme.hairline)
             if let search, searchActive {
                 SearchStatusLine(search: search)
+            } else if let favorites, favoritesActive {
+                FavoritesStatusLine(favorites: favorites)
             } else {
                 ListStatusLine(browse: browse, connected: connected)
             }
@@ -68,6 +79,8 @@ struct BrowsePane: View {
     private var content: some View {
         if let search, searchActive {
             SearchPane(search: search, onPick: onPickResult)
+        } else if let favorites, favoritesActive {
+            FavoritesPane(favorites: favorites, onPick: onPickFavorite)
         } else if let error = browse.error, browse.entries.isEmpty {
             failure(error)
         } else {
@@ -85,6 +98,9 @@ struct BrowsePane: View {
                           replacingName: replacingName,
                           onReplaceWith: onReplaceWith,
                           onMoveToFolder: onMoveToFolder,
+                          isFavorite: isFavorite,
+                          onToggleFavorite: onToggleFavorite,
+                          onFavoriteCurrentFolder: onFavoriteCurrentFolder,
                           reveal: reveal)
                 if let error = browse.error {
                     Text(error)
@@ -200,6 +216,8 @@ private struct PathBar: View {
     /// a control that cannot do anything should not be on screen at all.
     var backends: [FileBackend] = []
     var onSwitch: (FileBackend) -> Void = { _ in }
+    var favorites: FavoritesStore? = nil
+    var favoritesActive: Bool = false
     var search: SearchStore? = nil
     var searchActive: Bool = false
 
@@ -212,6 +230,8 @@ private struct PathBar: View {
     var body: some View {
         if let search, searchActive {
             SearchBar(search: search)
+        } else if let favorites, favoritesActive {
+            FavoritesBar(favorites: favorites) { favorites.dismiss() }
         } else {
             browsing
         }
@@ -271,7 +291,17 @@ private struct PathBar: View {
 
             if let search {
                 ChromeButton(symbol: "magnifyingglass", help: "Search \(search.scopeLabel) (⌘F)") {
+                    // Leaving the other mode is part of entering this one; see
+                    // RootView.enterMode.
+                    favorites?.dismiss()
                     search.active = true
+                }
+            }
+            if let favorites {
+                ChromeButton(symbol: "star",
+                             help: "Favorites on \(favorites.scopeLabel) (⇧⌘F)") {
+                    search?.dismiss()
+                    favorites.active = true
                 }
             }
 

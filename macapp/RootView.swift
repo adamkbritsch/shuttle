@@ -29,6 +29,12 @@ struct RootView: View {
     /// The pane an open Rename/Delete sheet is acting on. Both now work on either
     /// side, so reloading `dest` unconditionally would refresh the wrong list and
     /// leave the seedbox still showing something that has just been removed.
+    /// Saved locations, one store per side exactly like search. The LIST is keyed
+    /// by filesystem inside the store, so both sides show the same favorites when
+    /// they are on the same backend.
+    @StateObject private var favorites: FavoritesStore
+    @StateObject private var sourceFavorites: FavoritesStore
+
     /// Transfers this app performs itself, because the relay cannot write to the Mac.
     @StateObject private var local: LocalTransfers
     @State private var actionPane: BrowseStore?
@@ -92,6 +98,8 @@ struct RootView: View {
         _destTree = StateObject(wrappedValue: TreeStore(backend: s.nasBackend))
         _search = StateObject(wrappedValue: SearchStore(backend: s.nasBackend))
         _sourceSearch = StateObject(wrappedValue: SearchStore(backend: s.seedboxBackend))
+        _favorites = StateObject(wrappedValue: FavoritesStore(backend: s.nasBackend))
+        _sourceFavorites = StateObject(wrappedValue: FavoritesStore(backend: s.seedboxBackend))
         _local = StateObject(wrappedValue: LocalTransfers(api: s.api))
     }
 
@@ -180,6 +188,17 @@ struct RootView: View {
                                 bulkRenaming = nil
                                 Task {
                                     let out = await store.renameMany(on: actingPane.backend, steps)
+                                    // Applied for the whole plan: a step that was
+                                    // deferred has not moved anything yet, but the
+                                    // relay will apply it, so the bookmark should
+                                    // point where the file is going to be.
+                                    let favs = favoritesFor(actingPane)
+                                    for step in steps {
+                                        let moved = ((step.path as NSString)
+                                            .deletingLastPathComponent as NSString)
+                                            .appendingPathComponent(step.newName)
+                                        favs.rename(from: step.path, to: moved)
+                                    }
                                     // Deferred renames have changed nothing on disk,
                                     // so reloading would just redraw the old names.
                                     guard out.renamed > 0 else { return }
@@ -247,6 +266,11 @@ struct RootView: View {
                             }
                             Task {
                                 let didRename = await store.rename(on: actingPane.backend, path: path, newName: newName)
+                                if didRename {
+                                    let moved = ((path as NSString).deletingLastPathComponent
+                                                 as NSString).appendingPathComponent(newName)
+                                    favoritesFor(actingPane).rename(from: path, to: moved)
+                                }
                                 // A deferred rename changes nothing on disk yet, so
                                 // reloading would just redraw the old name.
                                 if didRename {
@@ -274,7 +298,11 @@ struct RootView: View {
                              sourceSelection: seedbox.selection, sourcePath: seedbox.path,
                              destSelection: dest.selection, destPath: dest.path,
                              activePane: $activePane,
-                             onFind: { (activePane == .seedbox ? sourceSearch : search).active = true },
+                             onFind: { enterMode(activePane == .seedbox ? seedbox : dest,
+                                                 favorites: false) },
+                             onFavorites: { enterMode(activePane == .seedbox ? seedbox : dest,
+                                                      favorites: true) },
+                             onAddFavorite: { addCurrentFolderToFavorites() },
                              landed: store.landedIn,
                              onLanded: { refreshIfShowing($0.dirs) },
                              onre: { refreshOnReturn() }))
@@ -484,6 +512,7 @@ struct RootView: View {
             SplitChild(SplitPaneSpec(min: Theme.listMin,
                                      holdingPriority: Theme.Hold.absorbs)) {
                 VStack(spacing: 0) {
+                    let favs = browse.mode == .seedbox ? sourceFavorites : favorites
                     BrowsePane(browse: browse, title: title,
                                onAddToQueue: { enqueue($0) },
                                destinationName: destinationLabel,
@@ -496,9 +525,19 @@ struct RootView: View {
                                replacingName: replacing?.name,
                                onReplaceWith: { confirmReplace(with: $0) },
                                onMoveToFolder: { beginMoveToFolder($0, in: browse, tree: tree) },
+                               isFavorite: { favs.contains($0) },
+                               onToggleFavorite: { favs.toggle($0) },
+                               onFavoriteCurrentFolder: {
+                                   favs.contains(browse.path)
+                                       ? favs.remove(browse.path)
+                                       : favs.addPath(browse.path)
+                               },
                                backends: backendChoices(for: browse),
                                onSwitch: { switchPane(browse, tree: tree,
                                                       search: search, to: $0) },
+                               favorites: favs,
+                               favoritesActive: favs.active,
+                               onPickFavorite: { pickFavorite($0, in: browse, tree: tree) },
                                search: search,
                                searchActive: search.active,
                                onPickResult: { pickResult($0, in: browse, tree: tree) },
@@ -564,6 +603,7 @@ struct RootView: View {
         conflict = nil
         tree.switchTo(next)
         search.switchTo(next)
+        (pane === dest ? favorites : sourceFavorites).switchTo(next)
         Task {
             await pane.switchTo(next)
             // Both panes may not sit on the same filesystem. Whichever side was NOT
@@ -592,6 +632,56 @@ struct RootView: View {
         if !relayUp { return "Shuttle cannot reach the relay yet" }
         if !store.seedbox.configured { return "The remote server has not been set up yet" }
         return nil
+    }
+
+    /// Jump to a saved location. Same body as `pickResult`, deliberately: a
+    /// favorite and a search hit are the same kind of answer, so they must land the
+    /// same way — the enclosing folder open, the row selected and centred.
+    private func pickFavorite(_ fav: Favorite, in pane: BrowseStore, tree: TreeStore) {
+        // Not named `store`: that is the RelayStore, and shadowing it here would
+        // make the toast below read as if it came from the favorites list.
+        let favs = pane.mode == .seedbox ? sourceFavorites : favorites
+        favs.dismiss()
+        let parent = (fav.path as NSString).deletingLastPathComponent
+        revealPath = fav.path
+        Task {
+            await pane.go(to: parent, revealing: fav.path)
+            tree.refresh(parent)
+            // A favorite outlives the thing it points at. Say so rather than
+            // leaving the pane looking merely empty.
+            if pane.error == nil, !pane.entries.contains(where: { $0.path == fav.path }) {
+                store.show("“\(fav.name)” is no longer there", isError: true)
+            }
+        }
+    }
+
+    /// Only one pane mode at a time. Search and favorites both replace the path bar
+    /// AND the pane body, so with both set the branch ORDER would silently decide
+    /// which you got — the kind of bug that looks like the click did nothing.
+    private func enterMode(_ pane: BrowseStore, favorites wantFavorites: Bool) {
+        let isSource = pane.mode == .seedbox
+        let s = isSource ? sourceSearch : search
+        let f = isSource ? sourceFavorites : favorites
+        s.active = !wantFavorites
+        f.active = wantFavorites
+    }
+
+    /// ⌘D on whichever pane is active.
+    private func addCurrentFolderToFavorites() {
+        let pane = activePane == .seedbox ? seedbox : dest
+        let favs = pane.mode == .seedbox ? sourceFavorites : favorites
+        if favs.contains(pane.path) {
+            favs.remove(pane.path)
+            store.show("Removed from favorites", isError: false)
+        } else {
+            favs.addPath(pane.path)
+            store.show("Added to favorites", isError: false)
+        }
+    }
+
+    /// The favorites list for whichever filesystem this pane is showing.
+    private func favoritesFor(_ pane: BrowseStore) -> FavoritesStore {
+        pane.mode == .seedbox ? sourceFavorites : favorites
     }
 
     private var actingPane: BrowseStore { actionPane ?? dest }
@@ -946,6 +1036,11 @@ struct RootView: View {
             switch await pane.backend.move(item.path, into: folder, newName: nil, overwrite: false) {
             case .moved:
                 moved += 1
+                // A move is a rename of the path, so a bookmark follows it for the
+                // same reason.
+                favoritesFor(pane).rename(
+                    from: item.path,
+                    to: (folder as NSString).appendingPathComponent(item.name))
             case .clash(let name, let existing):
                 // Park the remainder behind the sheet, exactly as a send conflict
                 // parks the rest of a selection.
@@ -996,6 +1091,12 @@ struct RootView: View {
             let outcome = await pane.backend.move(clash.item.path, into: clash.folder,
                                                   newName: overwrite ? nil : newName,
                                                   overwrite: overwrite)
+            if case .moved = outcome {
+                let landed = overwrite ? clash.item.name : newName
+                favoritesFor(pane).rename(
+                    from: clash.item.path,
+                    to: (clash.folder as NSString).appendingPathComponent(landed))
+            }
             if case .refused(let why) = outcome { store.show(why, isError: true) }
             if case .unreachable(let why) = outcome { store.show(why, isError: true) }
             await moveEach(clash.remaining, into: clash.folder, pane: pane, tree: tree)
@@ -1464,6 +1565,8 @@ private struct MenuBridge: ViewModifier {
     let destPath: String
     @Binding var activePane: BrowseStore.Mode
     let onFind: () -> Void
+    let onFavorites: () -> Void
+    let onAddFavorite: () -> Void
     let landed: Landing
     let onLanded: (Landing) -> Void
     let onre: () -> Void
@@ -1480,7 +1583,21 @@ private struct MenuBridge: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .shuttleFind)) { _ in
                 onFind()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleFavorites)) { _ in
+                onFavorites()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .shuttleAddFavorite)) { _ in
+                onAddFavorite()
+            }
             .onChange(of: landed) { _, dirs in onLanded(dirs) }
+            // Test hook: opens favorites without a click, so the pane mode can be
+            // exercised from a script. Costs nothing when the variable is unset.
+            .task {
+                guard ProcessInfo.processInfo.environment["SHUTTLE_OPEN_FAVORITES"] != nil
+                else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                onFavorites()
+            }
             // Coming back to the window is the other moment the listing is likely
             // stale — something may have changed it while you were elsewhere.
             .onReceive(NotificationCenter.default.publisher(

@@ -167,37 +167,9 @@ struct SearchResultsList: View {
         .background(Theme.listFill)
     }
 
-    /// The two-line shape `JobRow` already uses: what it is, then where it is.
-    private func row(_ entry: Entry) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: entry.symbol)
-                .font(.system(size: 11.5))
-                .foregroundStyle(entry.isDir ? Theme.folderGold : Theme.fileGrey)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(entry.name)
-                    .font(.system(size: 12.5, weight: .medium))
-                    // Middle, because the tail of a release name carries the
-                    // codec and group — the part you are scanning for.
-                    .lineLimit(1).truncationMode(.middle)
-                Text(parentPath(entry))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    // Head, because the tail identifies the folder and the
-                    // /queue/MediaVolume3 prefix is the disposable part.
-                    .lineLimit(1).truncationMode(.head)
-            }
-            Spacer(minLength: 6)
-            Text(entry.sizeLabel)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 1)
-    }
-
-    private func parentPath(_ entry: Entry) -> String {
-        let p = (entry.path as NSString).deletingLastPathComponent
-        return p.isEmpty ? "/" : p
-    }
+    /// Shared with the favorites list, so a search hit and a saved location are
+    /// the same two lines in the same geometry.
+    private func row(_ entry: Entry) -> some View { LocationRow(entry: entry) }
 }
 
 /// The status line while searching. Same geometry and voice as `ListStatusLine`,
@@ -266,7 +238,13 @@ struct SearchPane: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .lineLimit(4)
+                // See the note in FavoritesPane: unbounded `fixedSize` text inside
+                // a split pane can report an enormous ideal height and grow the
+                // window. These strings are short enough that it never showed, which
+                // is luck rather than safety.
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 260)
                 .padding(.horizontal, 18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
