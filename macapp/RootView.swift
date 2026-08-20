@@ -628,8 +628,24 @@ struct RootView: View {
     /// Setup checks. A banner that needed its own probes would either be stale or
     /// be probing constantly.
     private var setupGap: String? {
-        let relayUp: Bool = { if case .live = store.status { return true }; return false }()
-        if !relayUp { return "Shuttle cannot reach the relay yet" }
+        // Judged from LOCAL facts, because "have you set this up?" and "is the NAS
+        // reachable right now?" are different questions and only the first one this
+        // banner is for. An address and a token are both present exactly when setup
+        // has been done, and neither needs the relay to answer.
+        //
+        // The earlier version keyed off the relay being live, so any blip on a
+        // working install accused it of being unconfigured -- on a screen that
+        // already says Offline three times over.
+        if store.baseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Shuttle needs the address of your relay"
+        }
+        if TokenStore.current == nil {
+            return "Shuttle needs the relay's API token"
+        }
+        // Only meaningful once the relay is actually answering: while it is not,
+        // `seedbox` is whatever was last reported, and treating that as fact would
+        // put up a second wrong banner.
+        guard case .live = store.status else { return nil }
         if !store.seedbox.configured { return "The remote server has not been set up yet" }
         return nil
     }
