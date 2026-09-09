@@ -507,6 +507,11 @@ actor RelayAPI {
                          ok: "Created \(name)")
     }
 
+    /// Release a held job now instead of waiting out its timer.
+    func start(_ id: Int) async -> ActionResult {
+        await simplePost("v1/jobs/\(id)/start", [:], ok: "Starting now")
+    }
+
     func retry(_ id: Int) async -> ActionResult {
         await simplePost("v1/jobs/\(id)/retry", [:], ok: "Queued again")
     }

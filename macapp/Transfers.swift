@@ -196,6 +196,7 @@ private struct JobRow: View {
     let onCancel: () -> Void
     let onDismiss: () -> Void
     var onRetry: () -> Void = { }
+    var onStartNow: () -> Void = { }
     var isSelected: Bool = false
     var onSelect: () -> Void = { }
     let onLog: () -> Void
@@ -249,6 +250,13 @@ private struct JobRow: View {
                 if job.kind == .done, !job.isLocal {
                     ChromeButton(symbol: "checkmark.seal", help: "Verify file counts", action: onVerify)
                 }
+                // Only on a held job: for anything else "start now" is either
+                // meaningless or already what is happening.
+                if job.isHeld {
+                    ChromeButton(symbol: "play.circle",
+                                 help: "Try this again now instead of waiting",
+                                 action: onStartNow)
+                }
                 if job.kind == .failed {
                     ChromeButton(symbol: "arrow.clockwise",
                                  help: "Queue this transfer again", action: onRetry)
@@ -267,6 +275,10 @@ private struct JobRow: View {
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .contextMenu {
+            if job.isHeld {
+                Button("Try Again Now", action: onStartNow)
+                Divider()
+            }
             if job.isActive {
                 Button("Stop Transfer", action: onCancel)
                 Divider()

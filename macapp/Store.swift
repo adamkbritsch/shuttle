@@ -382,6 +382,7 @@ final class RelayStore: ObservableObject {
         await write(await backend.mkdir(parent: parent, name: name))
     }
     func retry(_ id: Int) async -> Bool { await write(await api.retry(id)) }
+    func startNow(_ id: Int) async -> Bool { await write(await api.start(id)) }
 
     private func write(_ r: ActionResult) async -> Bool {
         var ok = false

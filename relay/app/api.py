@@ -82,7 +82,7 @@ _search_slots = threading.BoundedSemaphore(2)
 # far fewer of those than this relay has threads.
 _fetch_slots = threading.BoundedSemaphore(4)
 
-_JOB_RE = re.compile(r"^/v1/jobs/(\d+)(?:/(cancel|dismiss|log|verify|retry))?$")
+_JOB_RE = re.compile(r"^/v1/jobs/(\d+)(?:/(cancel|dismiss|log|verify|retry|start))?$")
 
 # Columns never sent to a client: src_remote leaks the rclone remote name and the
 # client has no use for it.
@@ -394,6 +394,8 @@ class Handler(BaseHTTPRequestHandler):
             m = _JOB_RE.match(path)
             if m and m.group(2) == "retry":
                 return self._retry(int(m.group(1)))
+            if m and m.group(2) == "start":
+                return self._send(200, {"ok": self.jobs.start_now(int(m.group(1)))})
             if m and m.group(2) in ("cancel", "dismiss"):
                 return self._job_action(int(m.group(1)), m.group(2))
         except JobError as exc:

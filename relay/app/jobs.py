@@ -844,6 +844,34 @@ class Jobs:
             t.daemon = True
             t.start()
 
+    def start_now(self, jid: int) -> str:
+        """Release a held job immediately.
+
+        A hold is a guess about when the remote might be healthier, and a guess is
+        something the person watching may know better than we do. Without this the
+        only options on a held job were to wait out the timer or cancel it.
+        """
+        con = _connect()
+        row = con.execute("SELECT state, not_before FROM jobs WHERE id=?",
+                          (jid,)).fetchone()
+        if row is None:
+            con.close()
+            raise JobError(f"no such job: {jid}")
+        if row["state"] != "queued":
+            con.close()
+            raise JobError(f"job {jid} is {row['state']}, not waiting")
+        con.execute("UPDATE jobs SET not_before=0, error=NULL, updated_at=? "
+                    "WHERE id=?", (time.time(), jid))
+        con.commit(); con.close()
+        # Pushed unconditionally: a job whose timer has not fired is not on the
+        # queue, and one that IS already on it is harmless to see twice -- the
+        # worker re-reads state and a non-queued row is skipped.
+        self._q.put(jid)
+        with self._gate:
+            self._gate.notify()
+        self.log(f"job {jid} released by hand")
+        return "Starting now"
+
     def _release_hold(self, jid):
         con = _connect()
         row = con.execute("SELECT state FROM jobs WHERE id=?", (jid,)).fetchone()

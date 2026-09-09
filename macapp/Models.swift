@@ -130,6 +130,12 @@ struct Job: Decodable, Identifiable, Equatable {
     let createdAt: Double?
     let updatedAt: Double?
     let finishedAt: Double?
+    /// Epoch seconds before which the relay will not retry this job, set when a
+    /// crawling transfer is held. Absent on a job that has never been held.
+    let notBefore: Double?
+    /// How many times it has already been held, so the row can say "2nd retry"
+    /// rather than implying this is the first.
+    let holds: Int?
 
     /// A local transfer, presented as a `Job` so the whole Transfers pane renders it
     /// unchanged. Ids are NEGATIVE — that is the discriminator the pane's row actions
@@ -154,10 +160,32 @@ struct Job: Decodable, Identifiable, Equatable {
         createdAt = j.startedAt
         updatedAt = j.startedAt
         finishedAt = j.finishedAt
+        // Holds are a relay concept: this engine runs a job or fails it, and has
+        // nowhere to park one.
+        notBefore = nil
+        holds = nil
     }
 
     var kind: JobKind { JobKind(rawValue: state) ?? .unknown }
     var isActive: Bool { kind == .queued || kind == .running }
+
+    /// Waiting out a hold rather than waiting for a free slot.
+    ///
+    /// The relay sets `not_before` when it stops a transfer that was crawling and
+    /// decides to come back to it later. A held job and an ordinary queued one look
+    /// identical without this, which left the held one with no way to be started by
+    /// hand — you could only wait or cancel.
+    var isHeld: Bool {
+        kind == .queued && (notBefore ?? 0) > Date().timeIntervalSince1970
+    }
+
+    /// "in 14 min" / "in 40s", for the row. Nil when this job is not held.
+    var heldFor: String? {
+        guard let until = notBefore else { return nil }
+        let left = until - Date().timeIntervalSince1970
+        guard left > 0 else { return nil }
+        return left >= 90 ? "in \(Int((left / 60).rounded())) min" : "in \(Int(left))s"
+    }
     /// True for a transfer this app is performing itself. See `init(_ LocalJob)`.
     var isLocal: Bool { id < 0 }
 
