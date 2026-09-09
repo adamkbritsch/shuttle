@@ -228,6 +228,16 @@ someone other than whoever built it.
   Both are skipped while a dialog is open, and neither touches the remote side:
   that listing costs an FTP round trip, so it is refreshed when you ask and not
   on a timer.
+- **Slow transfers do not just sit there.** A transfer crawling below a floor for
+  a sustained window is stopped and tried again — first over a second transport
+  (SFTP on the same host and credentials, if the remote offers one), and failing
+  that it is held and requeued a quarter of an hour later, when the remote may
+  have recovered. It stays *queued* rather than failed, and says what it saw:
+  "remote server serving at 0.07 MiB/s — no faster transport is available;
+  retrying in 15 min". After several holds it gives up and says so rather than
+  retrying forever. The floor is deliberately low, because restarting throws away
+  everything transferred so far — nothing here resumes — so this only fires when
+  the current attempt was never going to finish.
 - **Retry** a failed transfer from the Failed tab: it re-queues the same source and
   destination rather than making you find them again.
 - **Free space** shown for the destination volume, so the number that would

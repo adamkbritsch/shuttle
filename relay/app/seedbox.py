@@ -16,6 +16,8 @@ needed at all. That is what makes a fresh clone configurable purely from the app
 """
 import json
 import os
+import socket
+import time
 import subprocess
 import threading
 
@@ -293,6 +295,74 @@ def size_of(rel: str, timeout: int = 60):
     if not item or item.get("IsDir"):
         return None
     return int(item.get("Size") or 0)
+
+
+# The transport a slow transfer falls back to. Same host and credentials, a
+# different door. Configurable because "which port is SSH on" is a per-provider
+# answer -- plenty of seedboxes run it somewhere other than 22, and some do not
+# offer it at all.
+FALLBACK_PROTOCOL = os.environ.get("RELAY_FALLBACK_PROTOCOL", "sftp")
+FALLBACK_PORT = int(os.environ.get("RELAY_FALLBACK_PORT", "22"))
+FALLBACK_REMOTE = "seedboxalt"
+
+_fallback_checked_at = 0.0
+_fallback_ok = False
+
+
+def fallback_env(base=None) -> dict:
+    """A SECOND rclone remote over `FALLBACK_PROTOCOL`, same credentials.
+
+    Added alongside the primary rather than replacing it, so a job can be retried
+    on the other transport without disturbing anything already running on this one.
+    """
+    e = env(base)
+    c = load()
+    if not c:
+        return e
+    spec = PROTOCOLS.get(FALLBACK_PROTOCOL, PROTOCOLS["sftp"])
+    up = FALLBACK_REMOTE.upper()
+    for k, v in spec.items():
+        e[f"RCLONE_CONFIG_{up}_{k.upper()}"] = v
+    e[f"RCLONE_CONFIG_{up}_HOST"] = c["host"]
+    e[f"RCLONE_CONFIG_{up}_USER"] = c["user"]
+    e[f"RCLONE_CONFIG_{up}_PASS"] = c.get("pass_obscured", "")
+    e[f"RCLONE_CONFIG_{up}_PORT"] = str(FALLBACK_PORT)
+    return e
+
+
+def fallback_remote_path(rel: str) -> str:
+    root = (load().get("root") or "/").rstrip("/")
+    return f"{FALLBACK_REMOTE}:{root}/{rel.lstrip('/')}" if root else \
+           f"{FALLBACK_REMOTE}:/{rel.lstrip('/')}"
+
+
+def fallback_available(timeout: float = 4.0) -> bool:
+    """Is the fallback port actually open?
+
+    A plain TCP connect, cached for a few minutes. Checked BEFORE a job is retried
+    so a dead port costs one connect rather than a full rclone start, a stall and a
+    timeout -- and so the job log can say "not available" instead of failing with
+    something that reads like a credentials problem.
+
+    Verified against the live seedbox on 2026-09-08: ports 22, 222, 2022, 2222,
+    22222, 2200 and 8022 are all closed there, and :21 answers as Pure-FTPd, which
+    speaks no SSH at all. So this returns False for that host and the caller holds
+    the job instead.
+    """
+    global _fallback_checked_at, _fallback_ok
+    now = time.time()
+    if now - _fallback_checked_at < 300:
+        return _fallback_ok
+    c = load()
+    ok = False
+    if c.get("host"):
+        try:
+            with socket.create_connection((c["host"], FALLBACK_PORT), timeout):
+                ok = True
+        except OSError:
+            ok = False
+    _fallback_checked_at, _fallback_ok = now, ok
+    return ok
 
 
 def mkdir(rel: str, timeout: int = 60) -> None:

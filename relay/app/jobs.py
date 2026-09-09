@@ -40,6 +40,23 @@ TREE = "/srv/tree"
 # seedbox's downloads dir, so `seedbox:` root == .../seedbox/downloads. Keeping the
 # distinction here (rather than in to_remote) preserves the plain prefix swap.
 SEEDBOX_MOUNT = TREE + "/seedbox/downloads"
+
+# When a transfer is crawling badly enough to be worth restarting.
+#
+# The floor is deliberately LOW. Restarting costs everything transferred so far --
+# rclone resumes nothing -- so this must only fire when the current attempt is so
+# slow that starting over cannot make things worse. Measured against the real
+# failure this was written for: 0.13 MiB/s, a 12-hour ETA on a 5.7 GB file.
+SLOW_FLOOR = int(os.environ.get("RELAY_SLOW_FLOOR", str(512 * 1024)))   # bytes/s
+# Long enough for rclone to open its connections and ramp; a transfer is not slow
+# because it has not started yet.
+SLOW_GRACE = float(os.environ.get("RELAY_SLOW_GRACE", "45"))
+# Sustained, not instantaneous. A single bad sample is a hiccup.
+SLOW_WINDOW = float(os.environ.get("RELAY_SLOW_WINDOW", "60"))
+# How long to wait before trying a held job again.
+HOLD_DELAY = float(os.environ.get("RELAY_HOLD_DELAY", "900"))
+# After this many holds, stop and report rather than retrying forever.
+MAX_HOLDS = int(os.environ.get("RELAY_MAX_HOLDS", "4"))
 RCLONE_REMOTE = os.environ.get("RELAY_REMOTE", "seedbox:")
 # NOT a `combine` remote. rclone 1.74.4's combine backend silently DROPS files when
 # listing a subdirectory of an FTP upstream ("Bad object: file not under root",
@@ -202,6 +219,14 @@ class Jobs:
             con.execute("ALTER TABLE jobs ADD COLUMN on_conflict TEXT DEFAULT 'overwrite'")
         if "replace_path" not in cols:
             con.execute("ALTER TABLE jobs ADD COLUMN replace_path TEXT")
+        # Slow-transfer handling: which transport this attempt should use, when it
+        # may next be tried, and how many times it has been held already.
+        if "transport" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN transport TEXT")
+        if "not_before" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN not_before REAL DEFAULT 0")
+        if "holds" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN holds INTEGER DEFAULT 0")
         # Anything left 'running' died with a previous container. Be honest that
         # rclone restarts an interrupted file from zero rather than resuming.
         n = con.execute(
@@ -226,8 +251,18 @@ class Jobs:
         self._gate = threading.Condition()
         self._limit = _read_limit()
         self._running = 0
+        now = time.time()
         for row in self.snapshot("queued"):
-            self._q.put(row["id"])
+            # A job held after a slow attempt keeps its wait across a restart;
+            # queueing it immediately here would defeat the hold every time the
+            # container bounced.
+            wait = (row["not_before"] or 0) - now if "not_before" in row.keys() else 0
+            if wait > 0:
+                t = threading.Timer(wait, self._release_hold, args=(row["id"],))
+                t.daemon = True
+                t.start()
+            else:
+                self._q.put(row["id"])
         for i in range(MAX_WORKERS):
             threading.Thread(target=self._worker, name=f"worker{i}", daemon=True).start()
 
@@ -258,7 +293,8 @@ class Jobs:
         return os.path.normpath(dest_dir).startswith(SEEDBOX_MOUNT)
 
     @classmethod
-    def rclone_ends(cls, src_real: str, dest_dir: str, dest_name: str):
+    def rclone_ends(cls, src_real: str, dest_dir: str, dest_name: str,
+                    transport: str = ""):
         """(source, destination) as rclone should see them, for either direction.
 
         Exactly one end is ever remote. A pull reads `seedbox:X` and writes a real
@@ -267,9 +303,18 @@ class Jobs:
         is why the direction lives here and nowhere else.
         """
         target = os.path.join(dest_dir, dest_name)
+
+        def remote(real):
+            # `transport` names the door, not the destination: same host, same
+            # credentials, different protocol. Empty means the configured default.
+            if transport and transport != "default":
+                rel = real[len(SEEDBOX_MOUNT):].lstrip("/")
+                return seedbox.fallback_remote_path(rel)
+            return cls.to_remote(real)
+
         if cls.dest_is_remote(dest_dir):
-            return src_real, cls.to_remote(target)
-        return cls.to_remote(src_real), target
+            return src_real, remote(target)
+        return remote(src_real), target
 
     # ---------- queue ----------
 
@@ -713,6 +758,117 @@ class Jobs:
                     self._gate.notify()
                 self._q.task_done()
 
+    def _handle_slow(self, jid, job, speed, transport):
+        """A transfer is crawling. Try the other transport, or stand down and come
+        back later.
+
+        Restarting throws away everything transferred so far, because rclone
+        resumes nothing -- so this is only reached from a floor low enough that
+        the current attempt was never going to finish in reasonable time anyway.
+
+        The order is deliberate. Switching transport is tried FIRST and costs one
+        TCP connect to find out; holding is the fallback to the fallback, for the
+        common case where the remote simply has nothing left to give and no other
+        door is open.
+        """
+        rate = f"{speed / 2**20:.2f} MiB/s"
+        holds = (job["holds"] if "holds" in job.keys() else 0) or 0
+
+        # Stop the crawling attempt before deciding, so its connections are not
+        # still competing with whatever comes next.
+        self._stop_proc(jid, why="slow")
+
+        if not transport and seedbox.fallback_available():
+            self.log(f"job {jid} slow at {rate}; retrying over "
+                     f"{seedbox.FALLBACK_PROTOCOL}")
+            self._requeue(jid, transport=seedbox.FALLBACK_PROTOCOL, delay=0,
+                          note=f"slow at {rate} - retrying over "
+                               f"{seedbox.FALLBACK_PROTOCOL}")
+            return
+
+        if holds + 1 > MAX_HOLDS:
+            self._finish_slow(jid, rate, holds)
+            return
+
+        why = ("no faster transport is available"
+               if not seedbox.fallback_available()
+               else f"{seedbox.FALLBACK_PROTOCOL} was no better")
+        mins = int(HOLD_DELAY // 60)
+        self.log(f"job {jid} slow at {rate}; {why}; holding {mins} min "
+                 f"(hold {holds + 1} of {MAX_HOLDS})")
+        # Back to the DEFAULT transport for the next attempt: the alternative was
+        # tried and was not better, so there is no reason to keep paying for it.
+        self._requeue(jid, transport="", delay=HOLD_DELAY, holds=holds + 1,
+                      note=f"remote server serving at {rate} - {why}; "
+                           f"retrying in {mins} min")
+
+    def _finish_slow(self, jid, rate, holds):
+        con = _connect()
+        con.execute(
+            "UPDATE jobs SET state='failed', error=?, finished_at=?, updated_at=? "
+            "WHERE id=?",
+            (f"gave up after {holds} retries - the remote server is serving at "
+             f"{rate}. Nothing here can speed that up; try again later.",
+             time.time(), time.time(), jid))
+        con.commit(); con.close()
+        self.log(f"job {jid} gave up after {holds} holds at {rate}")
+
+    def _requeue(self, jid, transport, delay, note, holds=None):
+        """Put a job back on the queue, now or later.
+
+        `not_before` is recorded so a restart re-arms the wait rather than
+        stampeding every held job the moment the container comes back.
+        """
+        now = time.time()
+        con = _connect()
+        if holds is None:
+            con.execute(
+                "UPDATE jobs SET state='queued', transport=?, not_before=?, "
+                "error=?, bytes_done=0, speed=0, eta=0, updated_at=? WHERE id=?",
+                (transport, now + delay, note, now, jid))
+        else:
+            con.execute(
+                "UPDATE jobs SET state='queued', transport=?, not_before=?, "
+                "holds=?, error=?, bytes_done=0, speed=0, eta=0, updated_at=? "
+                "WHERE id=?",
+                (transport, now + delay, holds, note, now, jid))
+        con.commit(); con.close()
+        with self._proc_lock:
+            self._cancelled.discard(jid)
+        if delay <= 0:
+            self._q.put(jid)
+            with self._gate:
+                self._gate.notify()
+        else:
+            t = threading.Timer(delay, self._release_hold, args=(jid,))
+            t.daemon = True
+            t.start()
+
+    def _release_hold(self, jid):
+        con = _connect()
+        row = con.execute("SELECT state FROM jobs WHERE id=?", (jid,)).fetchone()
+        con.close()
+        # Only if it is still waiting: it may have been cancelled or retried by
+        # hand while the timer was running.
+        if row and row["state"] == "queued":
+            self._q.put(jid)
+            with self._gate:
+                self._gate.notify()
+
+    def _stop_proc(self, jid, why=""):
+        with self._proc_lock:
+            proc = self._procs.get(jid)
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as exc:
+            self.log(f"job {jid} stop ({why}) failed: {exc!r}")
+
     def _run(self, jid):
         con = _connect()
         job = con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
@@ -721,8 +877,12 @@ class Jobs:
             return
 
         # Exactly one end is remote, and which one is the direction of this job.
+        transport = (job["transport"] if "transport" in job.keys() else "") or ""
+        # Defined here, not just before the stats loop: an rclone that dies before
+        # emitting a single record still reaches the check below.
+        slow_handled = False
         src_end, dest = self.rclone_ends(job["src_real"], job["dest_dir"],
-                                         job["dest_name"])
+                                         job["dest_name"], transport=transport)
         # `rclone copy SRCDIR DSTDIR` copies SRCDIR's *contents* into DSTDIR, so
         # for a directory the basename must be repeated on the destination or a
         # torrent folder dumps loose files straight into the volume root.
@@ -766,10 +926,15 @@ class Jobs:
                     return
                 # RCLONE_CONFIG_SEEDBOX_* rather than an rclone.conf, so a fresh
                 # clone needs no file on disk to reach the seedbox.
-                proc = subprocess.Popen(cmd, env=seedbox.env(), stdout=subprocess.DEVNULL,
+                proc = subprocess.Popen(cmd, env=(seedbox.fallback_env()
+                                                 if transport else seedbox.env()),
+                                        stdout=subprocess.DEVNULL,
                                         stderr=subprocess.PIPE, text=True,
                                         bufsize=1)
                 self._procs[jid] = proc
+            slow_since = None       # when this attempt started producing stats
+            slow_from = None        # when the current slow streak began
+            slow_handled = False
             for line in proc.stderr:
                 logf.write(line)
                 logf.flush()
@@ -811,6 +976,21 @@ class Jobs:
                 # does not grow, so the percentage cannot reach 100 early and needs
                 # no clamp. max() covers a planned figure that turned out short,
                 # and the fallback covers a source that could not be walked.
+                # Slow-transfer watch. Fed from the stats rclone is already
+                # emitting, so it costs nothing extra and sees exactly the figure
+                # the UI shows.
+                if slow_since is None:
+                    slow_since = time.time()
+                elapsed = time.time() - slow_since
+                if elapsed > SLOW_GRACE and not slow_handled:
+                    if speed >= SLOW_FLOOR:
+                        slow_from = None          # recovered; forget the streak
+                    else:
+                        slow_from = slow_from or time.time()
+                        if time.time() - slow_from >= SLOW_WINDOW:
+                            slow_handled = True
+                            self._handle_slow(jid, job, speed, transport)
+                            break
                 if planned_total:
                     total = max(planned_total, total)
                 # Clamp the REPORTED byte count instead, so a retry that restarts a
@@ -826,6 +1006,12 @@ class Jobs:
                 self._procs.pop(jid, None)
                 cancelled = jid in self._cancelled
                 self._cancelled.discard(jid)
+
+        if slow_handled:
+            # _handle_slow already wrote the row -- queued for another transport,
+            # held for later, or given up on. Falling through would mark it
+            # 'failed' purely because rclone exited non-zero after SIGTERM.
+            return
 
         if cancelled:
             # cancel() already wrote state and cleaned up; do not overwrite it
