@@ -860,8 +860,20 @@ class Jobs:
         if row["state"] != "queued":
             con.close()
             raise JobError(f"job {jid} is {row['state']}, not waiting")
-        con.execute("UPDATE jobs SET not_before=0, error=NULL, updated_at=? "
-                    "WHERE id=?", (time.time(), jid))
+        # Pressing play means "start over, properly", so BOTH of these reset:
+        #
+        # transport, because the primary is the one that should be tried first. A
+        # job that had been switched to the fallback would otherwise be retried on
+        # it forever, when the whole point of asking again by hand is usually that
+        # conditions have changed and the normal route may be fine now. If it is
+        # still slow, the automatic logic will switch again on its own.
+        #
+        # holds, because the counter exists to stop the AUTOMATIC retry looping.
+        # Leaving it would mean a job at the limit pressed by hand gets one slow
+        # sample and is failed outright instead of held -- pressing play and being
+        # told "gave up" is the opposite of what the button offers.
+        con.execute("UPDATE jobs SET not_before=0, transport='', holds=0, "
+                    "error=NULL, updated_at=? WHERE id=?", (time.time(), jid))
         con.commit(); con.close()
         # Pushed unconditionally: a job whose timer has not fired is not on the
         # queue, and one that IS already on it is harmless to see twice -- the
