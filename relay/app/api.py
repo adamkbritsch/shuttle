@@ -408,8 +408,18 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- endpoints ----------
 
     def _health(self):
+        """Deliberately does NOT touch the database.
+
+        This is the discovery probe -- it answers before auth and other tools rely
+        on it to decide whether a relay exists at an address. It used to count
+        active jobs with a query, which meant that when the database was busy the
+        relay looked DEAD rather than busy, exactly when someone was most likely to
+        be checking. `jobs_active` is kept in the response because callers parse
+        this shape; it is served from a counter the queue maintains, so the answer
+        is still true without a read that can block.
+        """
         self._send(200, {"ok": True, "service": "seedbox-ftp-relay", "api": 1,
-                         "jobs_active": len(self.jobs.snapshot("queued", "running"))})
+                         "jobs_active": self.jobs.active_count()})
 
     def _browse(self):
         q = self._q()

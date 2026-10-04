@@ -47,6 +47,9 @@ SEEDBOX_MOUNT = TREE + "/seedbox/downloads"
 # rclone resumes nothing -- so this must only fire when the current attempt is so
 # slow that starting over cannot make things worse. Measured against the real
 # failure this was written for: 0.13 MiB/s, a 12-hour ETA on a 5.7 GB file.
+# How often a running job's progress row is actually written. rclone reports
+# every second; the UI polls every second and interpolates fine from this.
+PROGRESS_WRITE_INTERVAL = float(os.environ.get("RELAY_PROGRESS_INTERVAL", "3"))
 SLOW_FLOOR = int(os.environ.get("RELAY_SLOW_FLOOR", str(512 * 1024)))   # bytes/s
 # Long enough for rclone to open its connections and ramp; a transfer is not slow
 # because it has not started yet.
@@ -196,10 +199,23 @@ def _count_tree(path):
 
 
 def _connect():
-    con = sqlite3.connect(DB_PATH, timeout=15)
+    con = sqlite3.connect(DB_PATH, timeout=60)
     con.row_factory = sqlite3.Row
     # WAL because the FTP handler threads read while the worker writes.
     con.execute("PRAGMA journal_mode=WAL")
+    # synchronous=NORMAL, not the FULL default.
+    #
+    # FULL fsyncs on every commit, and this database is written once per SECOND
+    # per running job. When the volume is busy -- a 4K remux landing on it, or
+    # Plex reading every file to build preview thumbnails -- those fsyncs queue
+    # behind the I/O and a commit can exceed the busy timeout. That surfaced as
+    # jobs dying with "database is locked" after transferring tens of GB, and as
+    # `GET /v1/jobs` returning 500 so the app could not see its own transfers.
+    #
+    # NORMAL is the documented companion to WAL: the only thing at risk is the
+    # last few transactions if the machine loses power mid-write, and what is at
+    # risk here is a progress percentage, which rclone re-reports a second later.
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
@@ -247,6 +263,7 @@ class Jobs:
         self._proc_lock = threading.Lock()
         self._procs = {}
         self._cancelled = set()
+        self._last_progress_write = {}
         # Concurrency gate. Workers wait here rather than being created/destroyed.
         self._gate = threading.Condition()
         self._limit = _read_limit()
@@ -486,6 +503,17 @@ class Jobs:
         con.close()
         return [dict(r) for r in rows]
 
+    def active_count(self) -> int:
+        """Queued + running, without a query.
+
+        Used by /healthz, which must stay answerable while the database is under
+        load -- see the note there. `_q.qsize()` plus the running counter is the
+        same number the old query returned, from state the queue already keeps.
+        """
+        with self._gate:
+            running = self._running
+        return self._q.qsize() + running
+
     def busy(self) -> bool:
         with self._active_lock:
             return self._active > 0
@@ -682,13 +710,32 @@ class Jobs:
         except OSError:
             pass
 
+    # Progress-only fields. A write carrying ONLY these can be skipped if one went
+    # out moments ago; anything else (state, error, finished_at) is a fact someone
+    # is waiting on and is never delayed.
+    _PROGRESS_ONLY = {"bytes_done", "bytes_total", "speed", "eta",
+                      "files_done", "files_total", "updated_at"}
+
     def _update(self, jid, **fields):
-        fields["updated_at"] = time.time()
+        # rclone reports stats every second per job. Writing all of them meant N
+        # commits a second against a database on a volume that is simultaneously
+        # absorbing the transfer itself. Coalescing the progress ones cuts that to
+        # one write per job per interval and costs nothing: the next tick carries
+        # the same figures, only fresher.
+        now = time.time()
+        if set(fields) <= self._PROGRESS_ONLY - {"updated_at"}:
+            last = self._last_progress_write.get(jid, 0.0)
+            if now - last < PROGRESS_WRITE_INTERVAL:
+                return
+            self._last_progress_write[jid] = now
+        fields["updated_at"] = now
         sets = ",".join(f"{k}=?" for k in fields)
         con = _connect()
-        con.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*fields.values(), jid))
-        con.commit()
-        con.close()
+        try:
+            con.execute(f"UPDATE jobs SET {sets} WHERE id=?", (*fields.values(), jid))
+            con.commit()
+        finally:
+            con.close()
 
     # ---------- worker ----------
 
